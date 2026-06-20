@@ -1,0 +1,9 @@
+
+mqsicreateexecutiongroup ACEDEMO -e ACE_DEMO_TRANSFORM
+mqsicreateexecutiongroup ACEDEMO -e ACE_DEMO_MESSAGING
+mqsicreateexecutiongroup ACEDEMO -e ACE_DEMO_CONNECTORS
+mqsicreateexecutiongroup ACEDEMO -e ACE_DEMO_CACHE
+mqsideploy ACEDEMO -e ACE_DEMO_TRANSFORM  -a ACE_DEMO_TRANSFORM.bar
+mqsideploy ACEDEMO -e ACE_DEMO_MESSAGING  -a ACE_DEMO_MESSAGING.bar
+mqsideploy ACEDEMO -e ACE_DEMO_CONNECTORS -a ACE_DEMO_CONNECTORS.bar
+mqsideploy ACEDEMO -e ACE_DEMO_CACHE      -a ACE_DEMO_CACHE.bar

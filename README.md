@@ -16,7 +16,7 @@
 │                        SSH via SG rule                               │
 │  ┌────────────────────────────────────────┐                         │
 │  │         Ansible Control Node           │                         │
-│  │  Ansible · MCP (:8080) · Chatbot (:3000)│                        │
+│  │  Ansible · Status dashboard (:8090)    │                         │
 │  └────────────────────────────────────────┘                         │
 │                                                                     │
 │  SSH key stored in AWS Secrets Manager (not in user_data)           │
@@ -73,9 +73,7 @@ Everything is tagged `ManagedBy = Terraform`. Nothing is left behind.
 | #7 | Remote S3 backend template included (commented out) — uncomment and fill in before production use |
 | #8 | `depends_on` added to Ansible control node to guarantee server IPs are known at plan time |
 | #11 | `allowed_cidr_blocks` has no default — Terraform will error if not set |
-| #13 | Node.js installed via NodeSource RPM (official method for RHEL 9) |
 | #14 | `export PATH=/usr/local/bin:$PATH` added early in every bootstrap script |
-| #15 | `mcp_port`/`chatbot_port` written to `/etc/ansible/group_vars/all.yml` — playbooks use them directly |
 | #16 | `.gitignore` added — prevents `.pem`, `.tfstate`, and `hosts.ini` from being committed |
 | #17 | `outputs.tf` — path output no longer marked `sensitive`; private key content never exposed as output |
 
@@ -106,8 +104,7 @@ Everything is tagged `ManagedBy = Terraform`. Nothing is left behind.
 | Port | Purpose |
 |------|---------|
 | 22 | SSH |
-| 8080 | MCP server |
-| 3000 | Chatbot |
+| 8090 | MQ/ACE status dashboard |
 
 ---
 

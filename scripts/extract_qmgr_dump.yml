@@ -1,0 +1,130 @@
+---
+###############################################################################
+# extract_qmgr_dump.yml — harvest full MQ queue-manager config from every
+#                         MQ/ACE server into a single qmgr_dump.csv
+#
+# Run from the Ansible Control Node:
+#   ansible-playbook -i /etc/ansible/hosts extract_qmgr_dump.yml
+#
+# What it does:
+#   1. On each MQ server, discover every RUNNING queue manager (dspmq).
+#   2. For each one, run:  dmpmqcfg -m <QM> -a -o 1line
+#      (-a = all attributes, -o 1line = one MQSC command per line — same tool
+#       as the sample `dmpmqcfg -m QM2 -t queue -a -o 1line`, but with no
+#       object-type filter so QMGR/queues/channels/topics/auth records are all
+#       captured, matching the reference resources/qmgr_dump.csv).
+#   3. Turn each DEFINE/ALTER/SET line into a pipe-delimited CSV row:
+#         extractedat|hostname|qmname|objecttype|objectdef
+#      where objecttype is the MQSC object keyword (QLOCAL, QALIAS, CHANNEL …).
+#   4. Fetch every server's fragment back and assemble one qmgr_dump.csv on the
+#      control node.
+#
+# Output (override with -e qmgr_dump_output=/path/file.csv):
+#   {{ playbook_dir }}/qmgr_dump.csv
+###############################################################################
+
+- name: Prepare local collection directory
+  hosts: localhost
+  gather_facts: false
+  vars:
+    qmgr_frag_dir: "/tmp/qmgr_dump_fragments"
+  tasks:
+    - name: Reset the fragment staging directory
+      ansible.builtin.file:
+        path: "{{ qmgr_frag_dir }}"
+        state: "{{ item }}"
+        mode: "0755"
+      loop: [absent, directory]
+
+    - name: Write the CSV header (sorts first, so it lands at the top)
+      ansible.builtin.copy:
+        dest: "{{ qmgr_frag_dir }}/00_header.csv"
+        mode: "0644"
+        content: "extractedat|hostname|qmname|objecttype|objectdef\n"
+
+- name: Extract queue-manager config from every MQ server
+  hosts: all_mq_servers
+  become: true
+  gather_facts: false
+  vars_files:
+    - mq_ace_install_vars.yml
+  vars:
+    qmgr_frag_dir: "/tmp/qmgr_dump_fragments"
+    remote_fragment: "/tmp/qmgr_dump.csv"
+
+  tasks:
+    - name: Confirm dmpmqcfg is installed
+      ansible.builtin.stat:
+        path: "{{ mq_install_dir }}/bin/dmpmqcfg"
+      register: dmpmqcfg_bin
+
+    - name: Fail if MQ is not installed on this host
+      ansible.builtin.assert:
+        that: dmpmqcfg_bin.stat.exists
+        fail_msg: "{{ mq_install_dir }}/bin/dmpmqcfg not found on {{ inventory_hostname }} — is IBM MQ installed?"
+
+    # One shell pass: for every RUNNING queue manager, dump its config and
+    # reshape each MQSC line into a CSV row. Runs as mqm so the local bindings
+    # connection is authorized without a password.
+    - name: Dump config for every running queue manager
+      ansible.builtin.shell: |
+        set -o pipefail
+        out="{{ remote_fragment }}"
+        : > "$out"
+        ts="$(date '+%Y-%m-%d %H:%M:%S')"
+        host="$(hostname)"
+        bin="{{ mq_install_dir }}/bin"
+        for qm in $("$bin/dspmq" | sed -n 's/^QMNAME(\([^)]*\)).*STATUS(Running).*/\1/p'); do
+          "$bin/dmpmqcfg" -m "$qm" -a -o 1line 2>/dev/null \
+            | awk -v ts="$ts" -v host="$host" -v qm="$qm" '
+                /^(DEFINE|ALTER|SET) / {
+                  t = $2; sub(/\(.*/, "", t);          # QLOCAL('Q') -> QLOCAL
+                  print ts "|" host "|" qm "|" t "|" $0
+                }' >> "$out"
+        done
+        wc -l < "$out"
+      args:
+        executable: /bin/bash
+      become_user: mqm
+      register: dump
+      changed_when: false
+
+    - name: Report rows captured on this host
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} → {{ dump.stdout | trim }} object definitions"
+
+    - name: Fetch this host's CSV fragment to the control node
+      ansible.builtin.fetch:
+        src: "{{ remote_fragment }}"
+        dest: "{{ qmgr_frag_dir }}/{{ inventory_hostname }}.csv"
+        flat: true
+
+- name: Assemble the combined qmgr_dump.csv
+  hosts: localhost
+  gather_facts: false
+  vars:
+    qmgr_dump_output: "/opt/apps/mqaceserver/resources/qmgr_dump.csv"
+    qmgr_frag_dir: "/tmp/qmgr_dump_fragments"
+  tasks:
+    - name: Ensure the output directory exists
+      ansible.builtin.file:
+        path: "{{ qmgr_dump_output | dirname }}"
+        state: directory
+        mode: "0755"
+
+    - name: Concatenate header + all host fragments
+      ansible.builtin.assemble:
+        src: "{{ qmgr_frag_dir }}"
+        dest: "{{ qmgr_dump_output }}"
+        mode: "0644"
+
+    - name: Count assembled rows (excluding header)
+      ansible.builtin.command: "wc -l {{ qmgr_dump_output }}"
+      register: total
+      changed_when: false
+
+    - name: Done
+      ansible.builtin.debug:
+        msg:
+          - "Wrote {{ qmgr_dump_output }}"
+          - "{{ total.stdout.split()[0] | int - 1 }} object definitions across all queue managers"

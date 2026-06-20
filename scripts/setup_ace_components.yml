@@ -1,0 +1,99 @@
+---
+###############################################################################
+# setup_ace_components.yml — create the demo integration servers and deploy the
+# demo BAR files on each ACE server, from scripts/acesetup/.
+#
+# Run AFTER install_ace.yml. On every MQ+ACE host it:
+#   1. creates 4 integration servers (execution groups):
+#        ACE_DEMO_TRANSFORM, ACE_DEMO_MESSAGING, ACE_DEMO_CONNECTORS, ACE_DEMO_CACHE
+#   2. deploys the matching BAR to each.
+#
+#   ansible-playbook -i /etc/ansible/hosts setup_ace_components.yml
+#
+# scripts/acesetup/setup hardcodes the integration node name "ACEDEMO", but the
+# install creates per-host nodes (server2 -> NODE1, server3 -> NODE2). We run the
+# script against this host's real node by substituting ACEDEMO -> {{ ace_setup_node }}
+# (word-boundary match, so the ACE_DEMO_* server/BAR names are left untouched).
+# Override the node with -e ace_setup_node=ACEDEMO if you really have one.
+#
+# Idempotent: mqsicreateexecutiongroup on an existing server is non-fatal, and
+# mqsideploy redeploys; the final mqsideploy determines success.
+###############################################################################
+
+- name: Create integration servers + deploy demo BARs from scripts/acesetup
+  hosts: mq_ace
+  become: true
+  gather_facts: false
+  vars_files:
+    - mq_ace_install_vars.yml
+  vars:
+    mqsiprofile: "{{ ace_install_parent }}/ace-{{ ace_version }}/server/bin/mqsiprofile"
+    ace_setup_node: "{{ ace_node_map[inventory_hostname] }}"
+    ace_setup_remote: "/var/tmp/acesetup"
+
+  tasks:
+    - name: Confirm the ACE runtime (mqsiprofile) is installed
+      ansible.builtin.stat:
+        path: "{{ mqsiprofile }}"
+      register: profile_bin
+
+    - name: Fail if ACE is not installed on this host
+      ansible.builtin.assert:
+        that: profile_bin.stat.exists
+        fail_msg: "{{ mqsiprofile }} not found on {{ inventory_hostname }} — run install_ace.yml first."
+
+    - name: Fail if no integration node is mapped for this host
+      ansible.builtin.assert:
+        that: ace_setup_node | length > 0
+        fail_msg: "No integration node mapped for {{ inventory_hostname }} (check ace_node_map)."
+
+    - name: Ensure the integration node is running
+      ansible.builtin.systemd:
+        name: "ace-{{ ace_setup_node }}"
+        state: started
+
+    - name: Stage the ACE setup script + BAR files
+      ansible.builtin.copy:
+        src: acesetup/
+        dest: "{{ ace_setup_remote }}/"
+        owner: "{{ ace_user }}"
+        group: "{{ ace_group }}"
+        mode: "0640"
+        directory_mode: "0750"
+
+    - name: Normalise the setup script's line endings (it ships as CRLF)
+      ansible.builtin.replace:
+        path: "{{ ace_setup_remote }}/setup"
+        regexp: '\r$'
+        replace: ''
+
+    # Run the setup script against this host's real node. Sourcing mqsiprofile
+    # puts mqsicreateexecutiongroup / mqsideploy on PATH; cwd is the staging dir
+    # so the relative *.bar paths in the script resolve.
+    - name: Create integration servers and deploy the BARs
+      ansible.builtin.shell: |
+        source {{ mqsiprofile }}
+        cd {{ ace_setup_remote }}
+        sed 's/\bACEDEMO\b/{{ ace_setup_node }}/g' setup | bash
+      args:
+        executable: /bin/bash
+      become_user: "{{ ace_user }}"
+      register: ace_setup_run
+      changed_when: true
+      failed_when: ace_setup_run.rc != 0
+
+    - name: Show the setup output
+      ansible.builtin.debug:
+        var: ace_setup_run.stdout_lines
+
+    - name: List integration servers + deployed apps on the node
+      ansible.builtin.shell: "source {{ mqsiprofile }} && mqsilist {{ ace_setup_node }} -r"
+      args:
+        executable: /bin/bash
+      become_user: "{{ ace_user }}"
+      changed_when: false
+      register: mqsilist
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} ({{ ace_setup_node }}) → {{ mqsilist.stdout_lines }}"

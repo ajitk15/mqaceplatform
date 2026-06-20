@@ -1,0 +1,93 @@
+---
+###############################################################################
+# setup_mq_components.yml — create each server's MQ components (queue managers,
+# cluster channels, queues, aliases) from the per-server scripts in
+# scripts/mqsetup/.
+#
+# Run AFTER install_mq.yml. Each MQ server gets the matching script by name:
+#   server1 -> mqsetup/server1_full_setup.mqsc   (MQREPO1 full repo + MQQM1)
+#   server2 -> mqsetup/server2_full_setup.mqsc   (MQREPO2 full repo + MQQM2)
+#   server3 -> mqsetup/server3_full_setup.mqsc   (MQQM3 + MQQM4)
+# which together build the ACECLUSTER cluster.
+#
+#   ansible-playbook -i /etc/ansible/hosts setup_mq_components.yml
+#
+# The scripts mix shell (crtmqm/strmqm) and MQSC (runmqsc heredocs), so they are
+# run as the mqm user with the MQ environment sourced. They are idempotent on
+# re-run: crtmqm/strmqm against an object that already exists are non-fatal, and
+# the MQSC uses REPLACE throughout — the final runmqsc determines success.
+###############################################################################
+
+- name: Create MQ components on each server from scripts/mqsetup
+  hosts: all_mq_servers
+  become: true
+  gather_facts: false
+  vars_files:
+    - mq_ace_install_vars.yml
+  vars:
+    mqsetup_src: "mqsetup/{{ inventory_hostname }}_full_setup.mqsc"
+    mqsetup_remote: "/var/tmp/{{ inventory_hostname }}_full_setup.mqsc"
+
+  tasks:
+    - name: Confirm a setup script exists for this host
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/{{ mqsetup_src }}"
+      delegate_to: localhost
+      become: false
+      register: mqsetup_local
+
+    - name: Fail clearly if this host has no mqsetup script
+      ansible.builtin.assert:
+        that: mqsetup_local.stat.exists
+        fail_msg: "No setup script {{ mqsetup_src }} found for {{ inventory_hostname }} in scripts/mqsetup/"
+
+    # The cluster channel CONNAMEs reference server1/server2/server3 by name
+    # (e.g. CONNAME('server2(1416)')), so every MQ server must resolve those
+    # names to the other nodes' private IPs.
+    - name: Ensure cluster member names resolve in /etc/hosts
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} ANSIBLE MANAGED — ACECLUSTER members"
+        block: |
+          {% for h in groups['all_mq_servers'] %}
+          {{ hostvars[h].ansible_host | default(h) }} {{ h }}
+          {% endfor %}
+
+    - name: Copy this server's MQ setup script
+      ansible.builtin.copy:
+        src: "{{ mqsetup_src }}"
+        dest: "{{ mqsetup_remote }}"
+        owner: mqm
+        group: mqm
+        mode: "0750"
+
+    - name: Normalise line endings (guard against CRLF from Windows edits)
+      ansible.builtin.replace:
+        path: "{{ mqsetup_remote }}"
+        regexp: '\r$'
+        replace: ''
+
+    - name: Create + configure MQ components (crtmqm / strmqm / runmqsc)
+      ansible.builtin.shell: |
+        source {{ mq_install_dir }}/bin/setmqenv -s
+        bash {{ mqsetup_remote }}
+      args:
+        executable: /bin/bash
+      become_user: mqm
+      register: mqsetup_run
+      changed_when: true
+      failed_when: mqsetup_run.rc != 0
+
+    - name: Show the setup output
+      ansible.builtin.debug:
+        var: mqsetup_run.stdout_lines
+
+    - name: List the queue managers now on this host
+      ansible.builtin.command: "{{ mq_install_dir }}/bin/dspmq"
+      become_user: mqm
+      changed_when: false
+      register: dspmq
+
+    - name: Report queue managers
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} → {{ dspmq.stdout_lines }}"

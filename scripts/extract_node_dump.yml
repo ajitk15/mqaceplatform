@@ -1,0 +1,170 @@
+---
+###############################################################################
+# extract_node_dump.yml — harvest IBM ACE integration-node state from every
+#                         MQ+ACE server into node_dump.csv + node_config.csv
+#
+# Run from the Ansible Control Node:
+#   ansible-playbook -i /etc/ansible/hosts extract_node_dump.yml
+#
+# What it does, per ACE host (group mq_ace):
+#   1. Discover every integration node on the box (the dirs ACE creates under
+#      /var/mqsi/components, e.g. NODE1, NODE2).
+#   2. node_dump.csv  ← run  mqsilist <node> -r  and keep every resource/status
+#      line (BIP1286I integration server, BIP1290I application deployed,
+#      BIP1288I message flow …), dropping the "command completion" footer.
+#         extractedat|hostname|node|resource
+#   3. node_config.csv ← one row mapping the node to its host + web admin port
+#      (queried live from the node, falling back to ace_web_port):
+#         node|host|nodeport
+#   4. Fetch each host's fragments back and assemble the two CSVs on the
+#      control node.
+#
+# Companion to extract_qmgr_dump.yml (MQ side). Outputs (override with -e):
+#   {{ playbook_dir }}/node_dump.csv
+#   {{ playbook_dir }}/node_config.csv
+###############################################################################
+
+- name: Prepare local collection directories
+  hosts: localhost
+  gather_facts: false
+  vars:
+    node_dump_frag_dir: "/tmp/node_dump_fragments"
+    node_cfg_frag_dir: "/tmp/node_config_fragments"
+  tasks:
+    - name: Wipe any stale fragments
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ node_dump_frag_dir }}"
+        - "{{ node_cfg_frag_dir }}"
+
+    - name: Recreate the staging directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ node_dump_frag_dir }}"
+        - "{{ node_cfg_frag_dir }}"
+
+    - name: Write the node_dump.csv header (sorts first)
+      ansible.builtin.copy:
+        dest: "{{ node_dump_frag_dir }}/00_header.csv"
+        mode: "0644"
+        content: "extractedat|hostname|node|resource\n"
+
+    - name: Write the node_config.csv header (sorts first)
+      ansible.builtin.copy:
+        dest: "{{ node_cfg_frag_dir }}/00_header.csv"
+        mode: "0644"
+        content: "node|host|nodeport\n"
+
+- name: Extract integration-node state from every ACE server
+  hosts: mq_ace
+  become: true
+  gather_facts: false
+  vars_files:
+    - mq_ace_install_vars.yml
+  vars:
+    mqsiprofile: "{{ ace_install_parent }}/ace-{{ ace_version }}/server/bin/mqsiprofile"
+    remote_dump: "/tmp/node_dump.csv"
+    remote_cfg: "/tmp/node_config.csv"
+    node_dump_frag_dir: "/tmp/node_dump_fragments"
+    node_cfg_frag_dir: "/tmp/node_config_fragments"
+
+  tasks:
+    - name: Confirm the ACE runtime (mqsiprofile) is installed
+      ansible.builtin.stat:
+        path: "{{ mqsiprofile }}"
+      register: profile_bin
+
+    - name: Fail if ACE is not installed on this host
+      ansible.builtin.assert:
+        that: profile_bin.stat.exists
+        fail_msg: "{{ mqsiprofile }} not found on {{ inventory_hostname }} — is IBM ACE installed?"
+
+    # One shell pass as mqm: for every integration node, dump its recursive
+    # resource listing and record its web admin port.
+    - name: Dump resources + config for every integration node
+      ansible.builtin.shell: |
+        set -o pipefail
+        out="{{ remote_dump }}"
+        cfg="{{ remote_cfg }}"
+        : > "$out"; : > "$cfg"
+        source "{{ mqsiprofile }}"
+        ts="$(date '+%Y-%m-%d %H:%M:%S')"
+        host="$(hostname)"
+        for node in $(find /var/mqsi/components -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null); do
+          # node_dump: every resource/status line, minus the completion footer
+          mqsilist "$node" -r 2>/dev/null \
+            | awk -v ts="$ts" -v host="$host" -v node="$node" '
+                /^BIP[0-9]+[A-Z]:/ && $0 !~ /BIP8071I/ {
+                  print ts "|" host "|" node "|" $0
+                }' >> "$out"
+          # node_config: node -> host -> web admin port (live, else the configured default)
+          port="$(mqsireportproperties "$node" -b webadmin -o HTTPConnector -n port 2>/dev/null \
+                  | sed -n "s/.*port='\([0-9]\+\)'.*/\1/p" | head -1)"
+          [ -z "$port" ] && port="{{ ace_web_port }}"
+          echo "$node|$host|$port" >> "$cfg"
+        done
+        wc -l < "$out"
+      args:
+        executable: /bin/bash
+      become_user: "{{ ace_user }}"
+      register: dump
+      changed_when: false
+
+    - name: Report resources captured on this host
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} → {{ dump.stdout | trim }} integration-node resource lines"
+
+    - name: Fetch the node_dump fragment to the control node
+      ansible.builtin.fetch:
+        src: "{{ remote_dump }}"
+        dest: "{{ node_dump_frag_dir }}/{{ inventory_hostname }}.csv"
+        flat: true
+
+    - name: Fetch the node_config fragment to the control node
+      ansible.builtin.fetch:
+        src: "{{ remote_cfg }}"
+        dest: "{{ node_cfg_frag_dir }}/{{ inventory_hostname }}.csv"
+        flat: true
+
+- name: Assemble the combined CSVs
+  hosts: localhost
+  gather_facts: false
+  vars:
+    node_dump_output: "/opt/apps/mqaceserver/resources/node_dump.csv"
+    node_config_output: "/opt/apps/mqaceserver/resources/node_config.csv"
+    node_dump_frag_dir: "/tmp/node_dump_fragments"
+    node_cfg_frag_dir: "/tmp/node_config_fragments"
+  tasks:
+    - name: Ensure the output directory exists
+      ansible.builtin.file:
+        path: "{{ node_dump_output | dirname }}"
+        state: directory
+        mode: "0755"
+
+    - name: Assemble node_dump.csv (header + all host fragments)
+      ansible.builtin.assemble:
+        src: "{{ node_dump_frag_dir }}"
+        dest: "{{ node_dump_output }}"
+        mode: "0644"
+
+    - name: Assemble node_config.csv (header + all host fragments)
+      ansible.builtin.assemble:
+        src: "{{ node_cfg_frag_dir }}"
+        dest: "{{ node_config_output }}"
+        mode: "0644"
+
+    - name: Count assembled node_dump rows (excluding header)
+      ansible.builtin.command: "wc -l {{ node_dump_output }}"
+      register: total
+      changed_when: false
+
+    - name: Done
+      ansible.builtin.debug:
+        msg:
+          - "Wrote {{ node_dump_output }} ({{ total.stdout.split()[0] | int - 1 }} resource lines)"
+          - "Wrote {{ node_config_output }} (one row per integration node)"

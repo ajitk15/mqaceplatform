@@ -33,7 +33,9 @@ mq_version: "9.4.2.0"
 mq_install_dir: "/opt/mqm"
 mq_staging_dir: "/opt/mq-binaries"
 mq_queue_manager: "QM1"
-mq_listener_port: 1414
+# QM1 shares server1 with MQREPO1 (which owns 1414), so QM1 listens on 1415
+# (freed by removing MQQM1). Stays within the 1414-1421 SG range.
+mq_listener_port: 1415
 # Developer convenience app/admin users + password (CHANGE for anything shared).
 mq_app_user: "app"
 mq_admin_user: "admin"
@@ -52,6 +54,27 @@ ace_web_port: 4414            # integration node web admin UI port
 ace_node_map:
   server2: "NODE1"
   server3: "NODE2"
+# Queue manager associated with each integration node
+# (server2: NODE1 -> MQNODE1, server3: NODE2 -> MQNODE2)
+ace_node_qmgr_map:
+  server2: "MQNODE1"
+  server3: "MQNODE2"
+# Listener port for each associated queue manager (must not clash with the
+# cluster QMs in scripts/mqsetup, which use 1414-1419).
+ace_node_qmgr_port_map:
+  server2: 1420   # MQNODE1
+  server3: 1421   # MQNODE2
+# Cluster that MQNODE1/MQNODE2 join, and the full repository their CLUSSDR
+# points at (MQREPO1 listens on server1:1414).
+ace_cluster_name: "ACECLUSTER"
+ace_cluster_repo_conname: "server1(1414)"
+# Cluster queue managers per host (used by the verify_mq_ace.yml health check).
+# Full repositories: MQREPO1, MQREPO2.  Partial members: MQNODE1, MQNODE2.
+cluster_qmgrs_map:
+  server1: ["MQREPO1"]
+  server2: ["MQREPO2", "MQNODE1"]
+  server3: ["MQNODE2"]
+ace_cluster_full_repos: ["MQREPO1", "MQREPO2"]
 
 # ---------------------------------------------------------------------------
 # Free-tier reality: t3.micro = 1 GB RAM. MQ/ACE want >= 2 GB.

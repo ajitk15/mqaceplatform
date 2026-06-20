@@ -1,0 +1,6 @@
+# SERVER3
+# No cluster queue managers are created on server3.
+# Its only queue manager — MQNODE2, the ACE integration node's associated queue
+# manager — is created by install_ace.yml (see ace_node_qmgr_map in
+# mq_ace_install_vars.yml). This file is intentionally a no-op so that
+# setup_mq_components.yml still runs cleanly for every MQ host.

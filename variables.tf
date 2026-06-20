@@ -78,18 +78,6 @@ variable "allowed_cidr_blocks" {
   }
 }
 
-variable "mcp_port" {
-  description = "Port the MCP server listens on"
-  type        = number
-  default     = 8080
-}
-
-variable "chatbot_port" {
-  description = "Port the Chatbot service listens on"
-  type        = number
-  default     = 3000
-}
-
 variable "environment" {
   description = "Environment label (dev / staging / prod)"
   type        = string

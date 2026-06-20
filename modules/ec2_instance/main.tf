@@ -63,7 +63,7 @@ resource "aws_instance" "this" {
 
   root_block_device {
     volume_type           = "gp3"
-    volume_size           = 50
+    volume_size           = 25
     delete_on_termination = true
     encrypted             = true
   }

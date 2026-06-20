@@ -116,4 +116,4 @@
 
     - name: Dashboard written
       ansible.builtin.debug:
-        msg: "Dashboard updated at {{ dashboard_dir }}/index.html ({{ ansible_date_time.iso8601 }})"
+        msg: "Dashboard updated at {{ dashboard_dir }}/index.html — served on :8090 by validate-dashboard.service ({{ ansible_date_time.iso8601 }})"

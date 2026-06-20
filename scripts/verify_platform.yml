@@ -3,9 +3,6 @@
 # Ansible Playbook: verify_platform.yml
 # Run from the Ansible Control Node:
 #   ansible-playbook /etc/ansible/playbooks/verify_platform.yml
-#
-# Fix #15 – mcp_port and chatbot_port now come from group_vars/all.yml
-#            (written by the bootstrap script), no need for --extra-vars.
 ###############################################################################
 
 - name: Verify connectivity and Python version on all MQ servers
@@ -72,31 +69,3 @@
         state: started
       ignore_errors: true
       delegate_to: localhost
-
-- name: Verify Ansible Control Node services
-  hosts: localhost
-  gather_facts: false
-
-  # Fix #15 – mcp_port / chatbot_port are defined in group_vars/all.yml
-  tasks:
-    - name: Check MCP server health
-      ansible.builtin.uri:
-        url: "http://localhost:{{ mcp_port }}/health"
-        method: GET
-        status_code: 200
-      register: mcp_health
-      ignore_errors: true
-
-    - name: Check Chatbot health
-      ansible.builtin.uri:
-        url: "http://localhost:{{ chatbot_port }}/health"
-        method: GET
-        status_code: 200
-      register: chatbot_health
-      ignore_errors: true
-
-    - name: Print service status
-      ansible.builtin.debug:
-        msg:
-          - "MCP server  (port {{ mcp_port }}):     {{ mcp_health.status    | default('UNREACHABLE') }}"
-          - "Chatbot     (port {{ chatbot_port }}): {{ chatbot_health.status | default('UNREACHABLE') }}"

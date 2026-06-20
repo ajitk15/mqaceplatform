@@ -27,16 +27,6 @@ output "ansible_control_private_ip" {
   value       = module.ansible_control.private_ip
 }
 
-output "mcp_url" {
-  description = "MCP server endpoint"
-  value       = "http://${module.ansible_control.public_ip}:${var.mcp_port}"
-}
-
-output "chatbot_url" {
-  description = "Chatbot service endpoint"
-  value       = "http://${module.ansible_control.public_ip}:${var.chatbot_port}"
-}
-
 output "ssh_command_ansible" {
   description = "SSH command to reach the Ansible control node"
   value       = "ssh -i ${var.platform_name}-key.pem ${var.rhel_user}@${module.ansible_control.public_ip}"
@@ -64,7 +54,7 @@ output "private_key_local_path" {
   value       = local_file.private_key.filename
 }
 
-output "secret_arn" {
-  description = "ARN of the Secrets Manager secret holding the platform SSH private key"
-  value       = aws_secretsmanager_secret.platform_key.arn
+output "ssh_key_parameter" {
+  description = "Name of the SSM Parameter Store SecureString holding the platform SSH private key"
+  value       = aws_ssm_parameter.platform_key.name
 }

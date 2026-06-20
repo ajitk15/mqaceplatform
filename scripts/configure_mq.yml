@@ -9,7 +9,7 @@
 ###############################################################################
 
 - name: Configure IBM MQ — queue manager, dev objects, web console
-  hosts: all_mq_servers
+  hosts: mq_only          # QM1 (dev/console) lives only on server1
   become: true
   gather_facts: false
   vars_files:

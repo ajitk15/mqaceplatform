@@ -9,8 +9,8 @@
 # ACE : integration server service active + admin REST endpoint answering
 ###############################################################################
 
-- name: Verify IBM MQ on all MQ servers
-  hosts: all_mq_servers
+- name: Verify IBM MQ dev queue manager (QM1) on server1
+  hosts: mq_only          # QM1 + DEV.QUEUE.1 + mqweb console live only on server1
   become: true
   gather_facts: false
   vars_files:
@@ -103,29 +103,33 @@
   gather_facts: false
   vars_files:
     - mq_ace_install_vars.yml
+  vars:
+    # The systemd service and admin REST API are keyed off the integration node
+    # name (ace-NODE1 / ace-NODE2) and its web admin port (ace_web_port, 4414).
+    node_name: "{{ ace_node_map[inventory_hostname] }}"
 
   tasks:
     - name: ACE integration server service is active
       ansible.builtin.systemd:
-        name: "ace-{{ ace_server_name }}"
+        name: "ace-{{ node_name }}"
       register: ace_svc
 
     - name: Assert ACE service is running
       ansible.builtin.assert:
         that: "ace_svc.status.ActiveState == 'active'"
-        fail_msg: "ACE service ace-{{ ace_server_name }} is {{ ace_svc.status.ActiveState }} on {{ inventory_hostname }}"
+        fail_msg: "ACE service ace-{{ node_name }} is {{ ace_svc.status.ActiveState }} on {{ inventory_hostname }}"
         success_msg: "ACE service active on {{ inventory_hostname }}"
 
     - name: Admin REST port is accepting connections
       ansible.builtin.wait_for:
         host: 127.0.0.1
-        port: "{{ ace_admin_port }}"
+        port: "{{ ace_web_port }}"
         timeout: 30
         state: started
 
     - name: Query the ACE admin REST API
       ansible.builtin.uri:
-        url: "http://127.0.0.1:{{ ace_admin_port }}/apiv2/servers"
+        url: "http://127.0.0.1:{{ ace_web_port }}/apiv2/servers"
         method: GET
         status_code: [200, 401]   # 401 = up but auth-protected (still proves it's alive)
         return_content: false
@@ -138,6 +142,66 @@
       ansible.builtin.debug:
         msg: "{{ inventory_hostname }} → ACE admin API responded HTTP {{ ace_api.status }}"
 
+- name: Verify ACECLUSTER cluster health
+  hosts: all_mq_servers
+  become: true
+  gather_facts: false
+  vars_files:
+    - mq_ace_install_vars.yml
+  vars:
+    cluster_qmgrs: "{{ cluster_qmgrs_map[inventory_hostname] | default([]) }}"
+
+  tasks:
+    - name: Note hosts with no cluster queue managers
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} has no cluster queue managers — nothing to check."
+      when: cluster_qmgrs | length == 0
+
+    - name: Check cluster membership of each local cluster queue manager
+      when: cluster_qmgrs | length > 0
+      block:
+        - name: Each cluster queue manager is running
+          ansible.builtin.command: "{{ mq_install_dir }}/bin/dspmq -m {{ item }}"
+          become_user: mqm
+          loop: "{{ cluster_qmgrs }}"
+          register: dspmq_cluster
+          changed_when: false
+          failed_when: "'(Running)' not in dspmq_cluster.stdout"
+          loop_control:
+            label: "{{ item }}"
+
+        # DIS CLUSQMGR(*) shows this QM's view of the cluster: every member it
+        # knows about, the cluster name, and each cluster channel's status.
+        - name: Display each QM's cluster view (DIS CLUSQMGR)
+          ansible.builtin.shell: |
+            set -o pipefail
+            echo 'DIS CLUSQMGR(*) CLUSTER STATUS CHANNEL' | {{ mq_install_dir }}/bin/runmqsc {{ item }}
+          args:
+            executable: /bin/bash
+          become_user: mqm
+          loop: "{{ cluster_qmgrs }}"
+          register: clusqmgr
+          changed_when: false
+          loop_control:
+            label: "{{ item }}"
+
+        # Healthy = the QM joined the cluster and can see BOTH full repositories
+        # (proves repository sync), with no cluster channel stuck RETRYING.
+        - name: Assert each QM joined {{ ace_cluster_name }} and sees both full repositories
+          ansible.builtin.assert:
+            that:
+              - "'CLUSTER(' ~ ace_cluster_name ~ ')' in item.stdout"
+              - "ace_cluster_full_repos | reject('in', item.stdout) | list | length == 0"
+              - "'STATUS(RETRYING)' not in item.stdout"
+            fail_msg: >-
+              {{ item.item }} on {{ inventory_hostname }} is NOT healthy in {{ ace_cluster_name }}:
+              it must see both full repositories {{ ace_cluster_full_repos | join(', ') }} with no
+              cluster channel in STATUS(RETRYING).
+            success_msg: "{{ item.item }} healthy in {{ ace_cluster_name }} (sees both full repos, no retrying channels)."
+          loop: "{{ clusqmgr.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+
 - name: Verification summary
   hosts: localhost
   gather_facts: false
@@ -145,7 +209,8 @@
     - name: Done
       ansible.builtin.debug:
         msg:
-          - "MQ  put/get round-trip verified on all_mq_servers"
-          - "MQ  Console (mqweb) running + HTTPS 9443 verified"
+          - "MQ  dev queue manager (QM1) put/get round-trip verified on server1"
+          - "MQ  Console (mqweb) running + HTTPS 9443 verified on server1"
+          - "MQ  ACECLUSTER health verified: every cluster QM sees both full repositories (MQREPO1, MQREPO2)"
           - "ACE integration server + admin API verified on mq_ace servers"
           - "If any task failed above, check the relevant server's journalctl / MQ error logs."

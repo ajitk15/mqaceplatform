@@ -27,7 +27,3 @@ data "aws_ami" "rhel" {
     values = ["ebs"]
   }
 }
-
-# Current AWS account & region (useful for outputs / ARN construction)
-data "aws_caller_identity" "current" {}
-data "aws_region" "current" {}

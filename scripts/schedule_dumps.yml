@@ -1,0 +1,79 @@
+---
+###############################################################################
+# schedule_dumps.yml — deploy the MQ/ACE config extractors onto the Ansible
+# control node and schedule them to run every hour.
+#
+# Run ONCE, on the control node itself, from this scripts/ directory:
+#   ansible-playbook schedule_dumps.yml
+#
+# Result:
+#   /opt/apps/mqaceserver/playbooks/   ← extract_qmgr_dump.yml, extract_node_dump.yml,
+#                                         mq_ace_install_vars.yml
+#   /opt/apps/mqaceserver/run_dumps.sh ← wrapper that runs both extractors
+#   /etc/cron.d/mqace-dumps            ← runs run_dumps.sh at minute 0 every hour
+#   /opt/apps/mqaceserver/resources/   ← consolidated qmgr_dump.csv, node_dump.csv,
+#                                         node_config.csv (written by each run)
+#
+# The extractors connect out to the MQ/ACE servers using the inventory at
+# /etc/ansible/hosts (created by the control-node bootstrap).
+###############################################################################
+
+- name: Install + schedule the hourly MQ/ACE config dumps on the control node
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: false
+  vars:
+    app_root: /opt/apps/mqaceserver
+    resources_dir: "{{ app_root }}/resources"
+    playbook_install_dir: "{{ app_root }}/playbooks"
+    inventory_file: /etc/ansible/hosts
+    cron_user: root
+
+  tasks:
+    - name: Create the application directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ app_root }}"
+        - "{{ resources_dir }}"
+        - "{{ playbook_install_dir }}"
+
+    - name: Install the extractor playbooks + shared vars
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ playbook_install_dir }}/{{ item }}"
+        mode: "0644"
+      loop:
+        - extract_qmgr_dump.yml
+        - extract_node_dump.yml
+        - mq_ace_install_vars.yml
+
+    - name: Install the dump runner script
+      ansible.builtin.copy:
+        src: run_dumps.sh
+        dest: "{{ app_root }}/run_dumps.sh"
+        mode: "0755"
+
+    - name: Schedule the dumps every hour (writes /etc/cron.d/mqace-dumps)
+      ansible.builtin.cron:
+        name: "mqace-config-dumps"
+        cron_file: mqace-dumps
+        user: "{{ cron_user }}"
+        minute: "0"
+        hour: "*"
+        job: >-
+          MQACE_PLAYBOOK_DIR={{ playbook_install_dir }}
+          MQACE_INVENTORY={{ inventory_file }}
+          MQACE_RESOURCES_DIR={{ resources_dir }}
+          {{ app_root }}/run_dumps.sh
+
+    - name: Show what was scheduled
+      ansible.builtin.debug:
+        msg:
+          - "Extractors installed in {{ playbook_install_dir }}"
+          - "Hourly cron (minute 0) → {{ app_root }}/run_dumps.sh"
+          - "Consolidated CSVs will be written to {{ resources_dir }}"
+          - "Run now to verify: {{ app_root }}/run_dumps.sh"

@@ -1,29 +1,26 @@
 #!/bin/bash
 ###############################################################################
-# Bootstrap: Ansible Control Node + MCP + Chatbot
+# Bootstrap: Ansible Control Node
 # OS: Red Hat Enterprise Linux 9
 #
 # Fixes applied:
-#   #1  – private key fetched from Secrets Manager at runtime (not in user_data)
+#   #1  – private key fetched from SSM Parameter Store at runtime (not in user_data)
 #   #4  – heredoc uses unquoted delimiter so Terraform interpolation works, but
-#          the key is written via aws secretsmanager rather than a shell variable
+#          the key is written via aws ssm get-parameter rather than a shell variable
 #   #5  – enable firewalld before using firewall-cmd
 #   #6  – python version derived from template variable
 #   #13 – Node.js installed via NodeSource RPM (not deprecated dnf module stream)
 #   #14 – /usr/local/bin added to PATH early
-#   #15 – mcp_port and chatbot_port written into group_vars for Ansible playbooks
 ###############################################################################
 set -euxo pipefail
 exec > >(tee /var/log/user-data.log | logger -t user-data) 2>&1
 
 # Template variables (resolved by Terraform)
 PYTHON_VERSION="${python_version}"
-SECRET_ARN="${secret_arn}"
+PARAM_NAME="${param_name}"
 SERVER1_IP="${server1_ip}"
 SERVER2_IP="${server2_ip}"
 SERVER3_IP="${server3_ip}"
-MCP_PORT="${mcp_port}"
-CHATBOT_PORT="${chatbot_port}"
 ANSIBLE_USER="${ansible_user}"
 HOME_DIR="/home/$${ANSIBLE_USER}"
 
@@ -82,14 +79,15 @@ echo "=== [4/10] Install Ansible via pip ==="
 # FIX #14 – verify using explicit path; not dependent on $PATH being set
 /usr/local/bin/ansible --version
 
-echo "=== [5/10] Fetch SSH private key from Secrets Manager (Fix #1 & #4) ==="
+echo "=== [5/10] Fetch SSH private key from SSM Parameter Store (Fix #1 & #4) ==="
 # The key is never in user_data or any shell variable – fetched securely at runtime.
 mkdir -p "$${HOME_DIR}/.ssh"
 chmod 700 "$${HOME_DIR}/.ssh"
 
-aws secretsmanager get-secret-value \
-  --secret-id "$${SECRET_ARN}" \
-  --query SecretString \
+aws ssm get-parameter \
+  --name "$${PARAM_NAME}" \
+  --with-decryption \
+  --query Parameter.Value \
   --output text \
   > "$${HOME_DIR}/.ssh/platform-key.pem"
 
@@ -124,7 +122,10 @@ remote_user         = $${ANSIBLE_USER}
 private_key_file    = $${HOME_DIR}/.ssh/platform-key.pem
 host_key_checking   = False
 retry_files_enabled = False
-stdout_callback     = yaml
+# community.general's "yaml" callback was removed in v12; use the built-in
+# default callback with YAML-formatted results instead.
+stdout_callback     = ansible.builtin.default
+result_format       = yaml
 interpreter_python  = /usr/local/bin/python3
 
 [ssh_connection]
@@ -132,12 +133,10 @@ ssh_args            = -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/nul
 pipelining          = True
 CFG
 
-# FIX #15 – write port vars into group_vars so playbooks can reference them
+# Set the Python interpreter for all Ansible playbooks
 mkdir -p /etc/ansible/group_vars
 cat > /etc/ansible/group_vars/all.yml << GVARS
 ---
-mcp_port: $${MCP_PORT}
-chatbot_port: $${CHATBOT_PORT}
 ansible_python_interpreter: /usr/local/bin/python3
 GVARS
 
@@ -146,148 +145,51 @@ echo "=== [7/10] Enable firewalld and open ports ==="
 systemctl enable --now firewalld
 systemctl is-active firewalld
 
-firewall-cmd --permanent --add-port=$${MCP_PORT}/tcp
-firewall-cmd --permanent --add-port=$${CHATBOT_PORT}/tcp
+firewall-cmd --permanent --add-port=8090/tcp
 firewall-cmd --permanent --add-port=22/tcp
 firewall-cmd --reload
-
-echo "=== [8/10] Install Node.js 20 via NodeSource (Fix #13) ==="
-# FIX #13 – dnf module streams for nodejs are unreliable on RHEL 9;
-#            NodeSource RPM repo is the supported production method.
-curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
-dnf install -y nodejs
-node --version
-npm --version
-
-echo "=== [9/10] Install and configure MCP server ==="
-mkdir -p /opt/mcp-server
-cat > /opt/mcp-server/package.json << 'PKGJSON'
-{
-  "name": "mcp-server",
-  "version": "1.0.0",
-  "main": "server.js",
-  "dependencies": {
-    "express": "^4.18.0",
-    "cors": "^2.8.5"
-  }
-}
-PKGJSON
-
-# Write server.js – use shell var for port (already resolved above)
-cat > /opt/mcp-server/server.js << MCPJS
-const express = require('express');
-const cors    = require('cors');
-const app     = express();
-app.use(cors());
-app.use(express.json());
-
-const PORT = process.env.MCP_PORT || $${MCP_PORT};
-
-app.get('/health', (_, res) => res.json({ status: 'ok', service: 'MCP', port: PORT }));
-app.post('/mcp', (req, res) => {
-  // Extend this to integrate with MQ/ACE services
-  res.json({ received: req.body, timestamp: new Date().toISOString() });
-});
-
-app.listen(PORT, () => console.log('MCP server running on port ' + PORT));
-MCPJS
-
-cd /opt/mcp-server && npm install
-
-echo "=== Install Chatbot server ==="
-mkdir -p /opt/chatbot
-cat > /opt/chatbot/package.json << 'PKGJSON'
-{
-  "name": "chatbot-server",
-  "version": "1.0.0",
-  "main": "server.js",
-  "dependencies": {
-    "express": "^4.18.0",
-    "cors": "^2.8.5",
-    "ws": "^8.0.0"
-  }
-}
-PKGJSON
-
-cat > /opt/chatbot/server.js << BOTJS
-const express = require('express');
-const cors    = require('cors');
-const { WebSocketServer } = require('ws');
-const app     = express();
-app.use(cors());
-app.use(express.json());
-
-const PORT = process.env.CHATBOT_PORT || $${CHATBOT_PORT};
-
-app.get('/health', (_, res) => res.json({ status: 'ok', service: 'Chatbot', port: PORT }));
-app.post('/message', (req, res) => {
-  const { message } = req.body;
-  res.json({ reply: 'Received: ' + message, timestamp: new Date().toISOString() });
-});
-
-const server = app.listen(PORT, () => console.log('Chatbot running on port ' + PORT));
-const wss    = new WebSocketServer({ server });
-wss.on('connection', ws => {
-  ws.send(JSON.stringify({ event: 'connected', service: 'Chatbot' }));
-  ws.on('message', data => ws.send(JSON.stringify({ echo: data.toString() })));
-});
-BOTJS
-
-cd /opt/chatbot && npm install
-
-echo "=== [10/10] Create and enable systemd services ==="
-cat > /etc/systemd/system/mcp-server.service << 'SVC'
-[Unit]
-Description=MCP Server
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=/opt/mcp-server
-ExecStart=/usr/bin/node server.js
-Environment=MCP_PORT=MCP_PORT_PLACEHOLDER
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-SVC
-
-# Substitute the port value into the systemd unit
-sed -i "s/MCP_PORT_PLACEHOLDER/$${MCP_PORT}/" /etc/systemd/system/mcp-server.service
-
-cat > /etc/systemd/system/chatbot.service << 'SVC'
-[Unit]
-Description=Chatbot Service
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=/opt/chatbot
-ExecStart=/usr/bin/node server.js
-Environment=CHATBOT_PORT=CHATBOT_PORT_PLACEHOLDER
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-SVC
-
-sed -i "s/CHATBOT_PORT_PLACEHOLDER/$${CHATBOT_PORT}/" /etc/systemd/system/chatbot.service
-
-systemctl daemon-reload
-systemctl enable --now mcp-server
-systemctl enable --now chatbot
 
 # Copy verify playbook
 cp /tmp/verify_platform.yml /etc/ansible/playbooks/verify_platform.yml 2>/dev/null || true
 
+echo "=== MQ/ACE validation dashboard server (port 8090) ==="
+# Serves the HTML rendered by validate_platform.yml; starts now with a
+# placeholder so http://<public-ip>:8090/ is live immediately.
+DASHBOARD_DIR="$${HOME_DIR}/validate-www"
+mkdir -p "$${DASHBOARD_DIR}"
+cat > "$${DASHBOARD_DIR}/index.html" << 'HTML'
+<!doctype html>
+<html><head><meta charset="utf-8"><title>MQ/ACE Validation Dashboard</title></head>
+<body style="font-family:sans-serif;margin:2rem">
+<h1>MQ/ACE Validation Dashboard</h1>
+<p>No data yet. Generate it from the control node with:</p>
+<pre>ansible-playbook /etc/ansible/playbooks/validate_platform.yml</pre>
+</body></html>
+HTML
+chown -R $${ANSIBLE_USER}:$${ANSIBLE_USER} "$${DASHBOARD_DIR}"
+
+cat > /etc/systemd/system/validate-dashboard.service << DASHSVC
+[Unit]
+Description=MQ/ACE Validation Dashboard (static HTTP on 8090)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$${ANSIBLE_USER}
+WorkingDirectory=$${DASHBOARD_DIR}
+ExecStart=/usr/local/bin/python3 -m http.server 8090 --bind 0.0.0.0 --directory $${DASHBOARD_DIR}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+DASHSVC
+
+systemctl daemon-reload
+systemctl enable --now validate-dashboard
+
 PUBLIC_IP=$(curl -s --max-time 5 http://169.254.169.254/latest/meta-data/public-ipv4 || echo "unknown")
 echo "=== Bootstrap complete – Ansible Control Node ready ==="
-echo "    MCP     → http://$${PUBLIC_IP}:$${MCP_PORT}/health"
-echo "    Chatbot → http://$${PUBLIC_IP}:$${CHATBOT_PORT}/health"
+echo "    Dashboard → http://$${PUBLIC_IP}:8090/"
 echo "    Run: ansible all -m ping"

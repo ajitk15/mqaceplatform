@@ -10,6 +10,8 @@
 #   ansible-playbook install_platform.yml
 ###############################################################################
 
-- import_playbook: install_mq.yml      # install MQ (mirrors the manual RPM install)
-- import_playbook: configure_mq.yml    # create queue manager + start MQ Console
-- import_playbook: install_ace.yml      # install ACE on the MQ+ACE servers
+- import_playbook: install_mq.yml           # install MQ (mirrors the manual RPM install)
+- import_playbook: setup_mq_components.yml  # create per-server QMs + ACECLUSTER from scripts/mqsetup
+- import_playbook: configure_mq.yml         # create dev QM (QM1) + start MQ Console
+- import_playbook: install_ace.yml          # install ACE on the MQ+ACE servers
+- import_playbook: setup_ace_components.yml # create integration servers + deploy demo BARs from scripts/acesetup

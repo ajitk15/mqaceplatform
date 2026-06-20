@@ -5,7 +5,7 @@
 #   Server 2  → MQ + ACE
 #   Server 3  → MQ + ACE
 #   Server 4  → MQ only
-#   Ansible   → Ansible Control Node + MCP + Chatbot
+#   Ansible   → Ansible Control Node
 ###############################################################################
 
 terraform {
@@ -43,7 +43,7 @@ provider "aws" {
 }
 
 ###############################################################################
-# Key Pair – generated locally; private key stored in Secrets Manager (Fix #1, #2)
+# Key Pair – generated locally; private key stored in SSM Parameter Store (Fix #1, #2)
 ###############################################################################
 resource "tls_private_key" "platform" {
   algorithm = "RSA"
@@ -62,22 +62,19 @@ resource "local_file" "private_key" {
   file_permission = "0600"
 }
 
-# FIX #1 & #2 – store private key in Secrets Manager; bootstrap script fetches it at runtime
-resource "aws_secretsmanager_secret" "platform_key" {
-  name                    = "${var.platform_name}/ssh-private-key"
-  description             = "Platform SSH private key for Ansible control node"
-  recovery_window_in_days = 0   # allow immediate destroy
+# FIX #1 & #2 – store private key in SSM Parameter Store (SecureString, free tier);
+# the control node's bootstrap fetches it at runtime via its IAM role.
+resource "aws_ssm_parameter" "platform_key" {
+  name        = "/${var.platform_name}/ssh-private-key"
+  description = "Platform SSH private key for Ansible control node"
+  type        = "SecureString"   # encrypted with the default aws/ssm KMS key (no cost)
+  value       = tls_private_key.platform.private_key_pem
 
   tags = local.common_tags
 }
 
-resource "aws_secretsmanager_secret_version" "platform_key" {
-  secret_id     = aws_secretsmanager_secret.platform_key.id
-  secret_string = tls_private_key.platform.private_key_pem
-}
-
 ###############################################################################
-# IAM Role – lets the Ansible control node read the secret (Fix #1)
+# IAM Role – lets the Ansible control node read the SSH key parameter (Fix #1)
 ###############################################################################
 resource "aws_iam_role" "ansible_control" {
   name = "${var.platform_name}-ansible-control-role"
@@ -100,11 +97,20 @@ resource "aws_iam_role_policy" "ansible_secrets" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect   = "Allow"
-      Action   = ["secretsmanager:GetSecretValue"]
-      Resource = aws_secretsmanager_secret.platform_key.arn
-    }]
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter"]
+        Resource = aws_ssm_parameter.platform_key.arn
+      },
+      {
+        # Decrypt the SecureString — scoped to calls made via SSM only.
+        Effect    = "Allow"
+        Action    = ["kms:Decrypt"]
+        Resource  = "*"
+        Condition = { StringEquals = { "kms:ViaService" = "ssm.${var.aws_region}.amazonaws.com" } }
+      }
+    ]
   })
 }
 
@@ -213,7 +219,7 @@ module "sg_ace" {
 module "sg_ansible" {
   source        = "./modules/security_groups"
   name          = "${var.platform_name}-sg-ansible"
-  description   = "Ansible control node + MCP + Chatbot ports"
+  description   = "Ansible control node ports"
   vpc_id        = aws_vpc.platform.id
   common_tags   = local.common_tags
   ingress_rules = local.ansible_ingress_rules
@@ -271,7 +277,7 @@ module "server3" {
 }
 
 ###############################################################################
-# Ansible Control Node  (Ansible + MCP + Chatbot)
+# Ansible Control Node
 # FIX #8 – explicit depends_on ensures private IPs are resolved before templating
 ###############################################################################
 module "ansible_control" {
@@ -283,15 +289,13 @@ module "ansible_control" {
   key_name           = aws_key_pair.platform.key_name
   security_group_ids = [module.sg_ansible.sg_id]
   iam_instance_profile = aws_iam_instance_profile.ansible_control.name
-  common_tags        = merge(local.common_tags, { Role = "AnsibleControl+MCP+Chatbot" })
+  common_tags        = merge(local.common_tags, { Role = "AnsibleControl" })
   user_data          = templatefile("${path.module}/scripts/ansible_control_setup.sh.tpl", {
     python_version     = var.python_version
-    secret_arn         = aws_secretsmanager_secret.platform_key.arn
+    param_name         = aws_ssm_parameter.platform_key.name
     server1_ip         = module.server1.private_ip
     server2_ip         = module.server2.private_ip
     server3_ip         = module.server3.private_ip
-    mcp_port           = var.mcp_port
-    chatbot_port       = var.chatbot_port
     ansible_user       = var.rhel_user
   })
 
@@ -299,7 +303,7 @@ module "ansible_control" {
     module.server1,
     module.server2,
     module.server3,
-    aws_secretsmanager_secret_version.platform_key,
+    aws_ssm_parameter.platform_key,
   ]
 }
 
@@ -318,4 +322,43 @@ resource "local_file" "ansible_inventory" {
     ssh_key_file = "${path.module}/${var.platform_name}-key.pem"
     ansible_user = var.rhel_user
   })
+}
+
+###############################################################################
+# Deploy the Ansible playbooks onto the control node (self-contained infra).
+# SSHes into the control node and copies scripts/ to /etc/ansible/playbooks/,
+# so the playbooks are ready to run with no manual upload. Re-runs whenever the
+# control node is replaced or any file under scripts/ changes.
+###############################################################################
+resource "terraform_data" "deploy_playbooks" {
+  triggers_replace = [
+    module.ansible_control.instance_id,
+    sha1(join("", [for f in fileset("${path.module}/scripts", "**") : filesha1("${path.module}/scripts/${f}")])),
+  ]
+
+  connection {
+    type        = "ssh"
+    host        = module.ansible_control.public_ip
+    user        = var.rhel_user
+    private_key = tls_private_key.platform.private_key_pem
+    timeout     = "10m"
+  }
+
+  # Upload the whole scripts/ tree to the operator's home directory.
+  provisioner "file" {
+    source      = "${path.module}/scripts"
+    destination = "/home/${var.rhel_user}"
+  }
+
+  # Wait for the bootstrap (cloud-init) to finish, then move the playbooks into
+  # place under /etc/ansible/playbooks.
+  provisioner "remote-exec" {
+    inline = [
+      "sudo cloud-init status --wait || true",
+      "sudo mkdir -p /etc/ansible/playbooks",
+      "sudo cp -r /home/${var.rhel_user}/scripts/. /etc/ansible/playbooks/",
+      "sudo chown -R root:root /etc/ansible/playbooks",
+      "echo 'Playbooks deployed to /etc/ansible/playbooks/'",
+    ]
+  }
 }
