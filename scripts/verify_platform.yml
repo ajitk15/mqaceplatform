@@ -1,0 +1,102 @@
+---
+###############################################################################
+# Ansible Playbook: verify_platform.yml
+# Run from the Ansible Control Node:
+#   ansible-playbook /etc/ansible/playbooks/verify_platform.yml
+#
+# Fix #15 – mcp_port and chatbot_port now come from group_vars/all.yml
+#            (written by the bootstrap script), no need for --extra-vars.
+###############################################################################
+
+- name: Verify connectivity and Python version on all MQ servers
+  hosts: all_mq_servers
+  gather_facts: true
+
+  tasks:
+    - name: Ping all hosts
+      ansible.builtin.ping:
+
+    - name: Check Python version
+      ansible.builtin.command: /usr/local/bin/python3 --version
+      register: py_version
+      changed_when: false
+
+    - name: Print Python version
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} → {{ py_version.stdout }}"
+
+    - name: Assert Python 3.13 or higher is installed
+      ansible.builtin.assert:
+        that:
+          - py_version.stdout is regex('Python 3\\.1[3-9]')
+        fail_msg: "Python 3.13+ NOT found on {{ inventory_hostname }}: {{ py_version.stdout }}"
+        success_msg: "Python 3.13+ confirmed on {{ inventory_hostname }}"
+
+    - name: Verify firewalld is active
+      ansible.builtin.systemd:
+        name: firewalld
+      register: fw_status
+
+    - name: Print firewalld status
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} firewalld state: {{ fw_status.status.ActiveState }}"
+
+    - name: Check MQ port 1414 is listening
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 1414
+        timeout: 5
+        state: started
+      ignore_errors: true
+      delegate_to: localhost
+
+- name: Verify MQ+ACE servers have ACE ports open
+  hosts: mq_ace
+  gather_facts: false
+
+  tasks:
+    - name: Check ACE HTTP port 7800
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 7800
+        timeout: 5
+        state: started
+      ignore_errors: true
+      delegate_to: localhost
+
+    - name: Check ACE admin port 4414
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 4414
+        timeout: 5
+        state: started
+      ignore_errors: true
+      delegate_to: localhost
+
+- name: Verify Ansible Control Node services
+  hosts: localhost
+  gather_facts: false
+
+  # Fix #15 – mcp_port / chatbot_port are defined in group_vars/all.yml
+  tasks:
+    - name: Check MCP server health
+      ansible.builtin.uri:
+        url: "http://localhost:{{ mcp_port }}/health"
+        method: GET
+        status_code: 200
+      register: mcp_health
+      ignore_errors: true
+
+    - name: Check Chatbot health
+      ansible.builtin.uri:
+        url: "http://localhost:{{ chatbot_port }}/health"
+        method: GET
+        status_code: 200
+      register: chatbot_health
+      ignore_errors: true
+
+    - name: Print service status
+      ansible.builtin.debug:
+        msg:
+          - "MCP server  (port {{ mcp_port }}):     {{ mcp_health.status    | default('UNREACHABLE') }}"
+          - "Chatbot     (port {{ chatbot_port }}): {{ chatbot_health.status | default('UNREACHABLE') }}"

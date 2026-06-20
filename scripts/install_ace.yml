@@ -1,0 +1,174 @@
+---
+###############################################################################
+# install_ace.yml — install IBM ACE 13 (Evaluation) and create an integration
+# node, mirroring the manual steps:
+#
+#   groupadd mqbrkrs
+#   usermod -aG mqbrkrs mqm                 (mqm already exists from MQ)
+#   mkdir -p /opt/ibm ; chmod -R ug=rwx,o=rx /opt/ibm
+#   cd /opt/ibm ; tar -xvzf /tmp/13.0.7.0-ACE-LINUX64-EVALUATION.tar.gz   (from S3)
+#   cd /opt/ibm/ace-13.0.7.0 ; ./ace make registry global accept license silently
+#   chmod -R ug=rwx,o=rx /opt/ibm/ace-13.0.7.0
+#   mqm .bash_profile:  . /opt/ibm/ace-13.0.7.0/server/bin/mqsiprofile
+#
+# Then creates the integration node (server2 -> NODE1, server3 -> NODE2),
+# sets its web admin port, starts it, and enables it on boot.
+#
+#   ansible-playbook -i /etc/ansible/hosts install_ace.yml
+###############################################################################
+
+- name: Install IBM ACE 13 and create the integration node
+  hosts: mq_ace
+  become: true
+  gather_facts: true
+  vars_files:
+    - mq_ace_install_vars.yml
+  vars:
+    ace_archive: "{{ ace_s3_key }}"
+    ace_home: "{{ ace_install_parent }}/ace-{{ ace_version }}"
+    mqsiprofile: "{{ ace_install_parent }}/ace-{{ ace_version }}/server/bin/mqsiprofile"
+    node_name: "{{ ace_node_map[inventory_hostname] }}"
+
+  tasks:
+    # --- 0. Swap (free-tier RAM) --------------------------------------------
+    - name: Configure swap if low on RAM
+      when: configure_swap | bool and ansible_memtotal_mb | int < 2048
+      block:
+        - name: Allocate swapfile
+          ansible.builtin.command: "fallocate -l {{ swap_size_mb }}M /swapfile"
+          args: { creates: /swapfile }
+        - name: Secure + enable swap
+          ansible.builtin.shell: |
+            set -e
+            chmod 600 /swapfile
+            if ! swapon --show | grep -q '/swapfile'; then
+              mkswap /swapfile; swapon /swapfile
+              grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+            fi
+          changed_when: false
+
+    # --- 1. Users / groups / dirs (== groupadd / usermod / mkdir / chmod) ---
+    - name: Ensure mqbrkrs group exists
+      ansible.builtin.group:
+        name: "{{ ace_group }}"
+        state: present
+
+    - name: Ensure mqm is in mqbrkrs
+      ansible.builtin.user:
+        name: "{{ ace_user }}"
+        groups: "{{ ace_group }}"
+        append: true
+
+    - name: Create /opt/ibm
+      ansible.builtin.file:
+        path: "{{ ace_install_parent }}"
+        state: directory
+        mode: "0775"
+
+    # --- 2. Fetch installer from S3 (control node) and copy to target -------
+    - name: Download ACE installer from S3 to the control node (once)
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.command: "aws s3 cp s3://{{ s3_bucket }}/{{ ace_archive }} /tmp/{{ ace_archive }}"
+      args:
+        creates: "/tmp/{{ ace_archive }}"
+
+    - name: Copy ACE installer to the target /tmp
+      ansible.builtin.copy:
+        src: "/tmp/{{ ace_archive }}"
+        dest: "/tmp/{{ ace_archive }}"
+        mode: "0644"
+
+    # --- 3. Extract + license + perms (== tar / ace make registry / chmod) --
+    - name: Extract ACE into /opt/ibm
+      ansible.builtin.unarchive:
+        src: "/tmp/{{ ace_archive }}"
+        dest: "{{ ace_install_parent }}"
+        remote_src: true
+        creates: "{{ mqsiprofile }}"
+
+    - name: Accept the ACE license (registry global, silent)
+      ansible.builtin.command: "./ace make registry global accept license silently"
+      args:
+        chdir: "{{ ace_home }}"
+      register: ace_license
+      changed_when: ace_license.rc == 0
+      failed_when: ace_license.rc != 0 and 'already' not in (ace_license.stdout | lower)
+
+    - name: Set permissions on the ACE install
+      ansible.builtin.command: "chmod -R ug=rwx,o=rx {{ ace_home }}"
+      changed_when: false
+
+    - name: Add mqsiprofile to mqm's .bash_profile
+      ansible.builtin.lineinfile:
+        path: "/home/{{ ace_user }}/.bash_profile"
+        line: ". {{ mqsiprofile }}"
+        create: true
+        owner: "{{ ace_user }}"
+        group: "{{ ace_user }}"
+        mode: "0644"
+
+    # --- 4. Integration node creation (NODE1 / NODE2) -----------------------
+    - name: Ensure ACE work path exists (owned by mqm)
+      ansible.builtin.file:
+        path: /var/mqsi
+        state: directory
+        owner: "{{ ace_user }}"
+        group: "{{ ace_group }}"
+        mode: "0775"
+
+    - name: Create integration node {{ node_name }}
+      ansible.builtin.shell: "source {{ mqsiprofile }} && mqsicreatebroker {{ node_name }}"
+      args:
+        executable: /bin/bash
+        creates: "/var/mqsi/components/{{ node_name }}"
+      become_user: "{{ ace_user }}"
+
+    - name: Set the integration node web admin port to {{ ace_web_port }}
+      ansible.builtin.shell: "source {{ mqsiprofile }} && mqsichangeproperties {{ node_name }} -b webadmin -o HTTPConnector -n port -v {{ ace_web_port }}"
+      args:
+        executable: /bin/bash
+      become_user: "{{ ace_user }}"
+      changed_when: true
+
+    - name: Systemd unit for the integration node
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/ace-{{ node_name }}.service"
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=IBM ACE Integration Node {{ node_name }}
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          TimeoutStartSec=300
+          User={{ ace_user }}
+          # Non-login shell: source mqsiprofile exactly once (ACE forbids re-sourcing)
+          ExecStart=/bin/bash -c 'source {{ mqsiprofile }} && mqsistart {{ node_name }}'
+          ExecStop=/bin/bash -c 'source {{ mqsiprofile }} && mqsistop {{ node_name }}'
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable + start the integration node
+      ansible.builtin.systemd:
+        name: "ace-{{ node_name }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Open ACE web admin port in firewalld
+      ansible.builtin.shell: |
+        systemctl enable --now firewalld
+        firewall-cmd --permanent --add-port={{ ace_web_port }}/tcp
+        firewall-cmd --reload
+      register: ace_fw
+      changed_when: "'Warning: ALREADY_ENABLED' not in ace_fw.stderr"
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} → ACE {{ ace_version }} node {{ node_name }}, web admin on {{ ace_web_port }}"

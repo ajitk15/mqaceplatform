@@ -1,0 +1,151 @@
+---
+###############################################################################
+# verify_mq_ace.yml — functional verification of the MQ/ACE install
+#
+# Run AFTER install_platform.yml, from the Ansible Control Node:
+#   ansible-playbook -i /etc/ansible/hosts verify_mq_ace.yml
+#
+# MQ  : queue manager RUNNING + listener up + round-trip put/get on DEV.QUEUE.1
+# ACE : integration server service active + admin REST endpoint answering
+###############################################################################
+
+- name: Verify IBM MQ on all MQ servers
+  hosts: all_mq_servers
+  become: true
+  gather_facts: false
+  vars_files:
+    - mq_ace_install_vars.yml
+  vars:
+    mq_samp_bin: "{{ mq_install_dir }}/samp/bin"
+    test_message: "mq-verify-{{ inventory_hostname }}-{{ ansible_date_time.iso8601 | default('msg') }}"
+
+  tasks:
+    - name: Queue manager status
+      ansible.builtin.command: "{{ mq_install_dir }}/bin/dspmq -m {{ mq_queue_manager }}"
+      register: dspmq
+      changed_when: false
+      become_user: mqm
+
+    - name: Assert queue manager is RUNNING
+      ansible.builtin.assert:
+        that: "'STATUS(Running)' in dspmq.stdout or 'RUNNING' in (dspmq.stdout | upper)"
+        fail_msg: "{{ mq_queue_manager }} is NOT running on {{ inventory_hostname }}: {{ dspmq.stdout }}"
+        success_msg: "{{ mq_queue_manager }} is running on {{ inventory_hostname }}"
+
+    - name: Listener port is accepting connections
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ mq_listener_port }}"
+        timeout: 10
+        state: started
+
+    - name: PUT a test message onto DEV.QUEUE.1
+      ansible.builtin.shell: >
+        set -o pipefail;
+        echo "{{ test_message }}" | {{ mq_samp_bin }}/amqsput DEV.QUEUE.1 {{ mq_queue_manager }}
+      args:
+        executable: /bin/bash
+      register: amqsput
+      changed_when: true
+      become_user: mqm
+
+    - name: GET the test message back from DEV.QUEUE.1
+      # amqsget drains the queue and exits after a short no-message wait.
+      ansible.builtin.command: "{{ mq_samp_bin }}/amqsget DEV.QUEUE.1 {{ mq_queue_manager }}"
+      register: amqsget
+      changed_when: false
+      become_user: mqm
+
+    - name: Assert the round-trip message was received
+      ansible.builtin.assert:
+        that: "test_message in amqsget.stdout"
+        fail_msg: "Did NOT read back the test message on {{ inventory_hostname }}. Output: {{ amqsget.stdout }}"
+        success_msg: "MQ put/get round-trip OK on {{ inventory_hostname }}"
+
+    - name: mqweb (MQ Console / REST API) status
+      ansible.builtin.command: "{{ mq_install_dir }}/bin/dspmqweb status"
+      register: dspmqweb
+      changed_when: false
+      become_user: mqm
+
+    - name: Assert mqweb is running
+      ansible.builtin.assert:
+        that: "'Running' in dspmqweb.stdout"
+        fail_msg: "mqweb is NOT running on {{ inventory_hostname }}: {{ dspmqweb.stdout }}"
+        success_msg: "mqweb running on {{ inventory_hostname }}"
+
+    - name: MQ Console HTTPS port is accepting connections
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 9443
+        timeout: 30
+        state: started
+
+    - name: MQ Console responds over HTTPS
+      ansible.builtin.uri:
+        url: "https://127.0.0.1:9443/ibmmq/console/"
+        method: GET
+        validate_certs: false           # mqweb ships a self-signed cert by default
+        status_code: [200, 302, 401]     # any of these proves the console is alive
+        follow_redirects: none
+      register: console_api
+      retries: 5
+      delay: 10
+      until: console_api.status in [200, 302, 401]
+
+    - name: Show MQ Console result
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} → MQ Console HTTP {{ console_api.status }} · https://{{ ansible_host | default(inventory_hostname) }}:9443/ibmmq/console/"
+
+- name: Verify IBM ACE on MQ+ACE servers
+  hosts: mq_ace
+  become: true
+  gather_facts: false
+  vars_files:
+    - mq_ace_install_vars.yml
+
+  tasks:
+    - name: ACE integration server service is active
+      ansible.builtin.systemd:
+        name: "ace-{{ ace_server_name }}"
+      register: ace_svc
+
+    - name: Assert ACE service is running
+      ansible.builtin.assert:
+        that: "ace_svc.status.ActiveState == 'active'"
+        fail_msg: "ACE service ace-{{ ace_server_name }} is {{ ace_svc.status.ActiveState }} on {{ inventory_hostname }}"
+        success_msg: "ACE service active on {{ inventory_hostname }}"
+
+    - name: Admin REST port is accepting connections
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ ace_admin_port }}"
+        timeout: 30
+        state: started
+
+    - name: Query the ACE admin REST API
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ ace_admin_port }}/apiv2/servers"
+        method: GET
+        status_code: [200, 401]   # 401 = up but auth-protected (still proves it's alive)
+        return_content: false
+      register: ace_api
+      retries: 5
+      delay: 10
+      until: ace_api.status in [200, 401]
+
+    - name: Show ACE admin API result
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} → ACE admin API responded HTTP {{ ace_api.status }}"
+
+- name: Verification summary
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Done
+      ansible.builtin.debug:
+        msg:
+          - "MQ  put/get round-trip verified on all_mq_servers"
+          - "MQ  Console (mqweb) running + HTTPS 9443 verified"
+          - "ACE integration server + admin API verified on mq_ace servers"
+          - "If any task failed above, check the relevant server's journalctl / MQ error logs."

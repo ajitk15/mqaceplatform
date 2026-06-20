@@ -1,0 +1,131 @@
+---
+###############################################################################
+# install_mq.yml — install IBM MQ Advanced for Developers
+#
+# Mirrors the proven manual install, run via Ansible against all MQ servers:
+#   wget https://public.dhe.ibm.com/.../9.4.5.0-IBM-MQ-Advanced-for-Developers-LinuxX64.tar.gz
+#   tar -xzvf 9.4.5.0-IBM-MQ-Advanced-for-Developers-LinuxX64.tar.gz
+#   cd MQServer/
+#   sudo ./mqlicense.sh -accept
+#   sudo rpm -ivh MQSeriesClient*.rpm MQSeriesGSKit*.rpm MQSeriesJava*.rpm \
+#                 MQSeriesJRE*.rpm MQSeriesMan*.rpm MQSeriesRuntime*.rpm \
+#                 MQSeriesSamples*.rpm MQSeriesSDK*.rpm MQSeriesServer*.rpm \
+#                 MQSeriesXRService*.rpm MQSeriesWeb*.rpm
+#   sudo /opt/mqm/bin/setmqinst -i -p /opt/mqm
+#
+# Run from the Ansible Control Node (use the OS ansible-core, e.g. /usr/bin):
+#   ansible-playbook -i /etc/ansible/hosts install_mq.yml
+#
+# Binaries are the FREE developer edition from IBM's public mirror — no IBMid.
+###############################################################################
+
+- name: Install IBM MQ Advanced for Developers (mirrors the manual RPM install)
+  hosts: all_mq_servers
+  become: true
+  gather_facts: true
+
+  vars:
+    mq_version: "9.4.5.0"
+    mq_archive: "{{ mq_version }}-IBM-MQ-Advanced-for-Developers-LinuxX64.tar.gz"
+    mq_download_url: "https://public.dhe.ibm.com/ibmdl/export/pub/software/websphere/messaging/mqadv/{{ mq_archive }}"
+    mq_staging_dir: "/opt/mq-binaries"
+    mq_install_dir: "/opt/mqm"
+    # Exact package set from the manual install (rpm -ivh ...)
+    mq_packages:
+      - MQSeriesClient
+      - MQSeriesGSKit
+      - MQSeriesJava
+      - MQSeriesJRE
+      - MQSeriesMan
+      - MQSeriesRuntime
+      - MQSeriesSamples
+      - MQSeriesSDK
+      - MQSeriesServer
+      - MQSeriesXRService
+      - MQSeriesWeb
+    # t3.micro has ~1 GB RAM; a swapfile keeps the install/runtime healthy.
+    configure_swap: true
+    swap_size_mb: 2048
+
+  tasks:
+    # --- 0. Swap (free-tier RAM mitigation) ---------------------------------
+    - name: Configure swap if low on RAM
+      when: configure_swap | bool and ansible_memtotal_mb | int < 2048
+      block:
+        - name: Allocate swapfile
+          ansible.builtin.command: "fallocate -l {{ swap_size_mb }}M /swapfile"
+          args:
+            creates: /swapfile
+        - name: Secure swapfile
+          ansible.builtin.file:
+            path: /swapfile
+            mode: "0600"
+        - name: Format + enable swap
+          ansible.builtin.shell: |
+            set -e
+            if ! swapon --show | grep -q '/swapfile'; then
+              mkswap /swapfile
+              swapon /swapfile
+              grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+            fi
+          register: swap_setup
+          changed_when: "'/swapfile' in swap_setup.stdout or swap_setup.rc == 0"
+
+    # --- 1. Download + extract (== wget && tar -xzvf) -----------------------
+    - name: Ensure staging dir exists
+      ansible.builtin.file:
+        path: "{{ mq_staging_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Download MQ Advanced for Developers
+      ansible.builtin.get_url:
+        url: "{{ mq_download_url }}"
+        dest: "{{ mq_staging_dir }}/{{ mq_archive }}"
+        mode: "0644"
+
+    - name: Extract the MQ archive
+      ansible.builtin.unarchive:
+        src: "{{ mq_staging_dir }}/{{ mq_archive }}"
+        dest: "{{ mq_staging_dir }}"
+        remote_src: true
+        creates: "{{ mq_staging_dir }}/MQServer/mqlicense.sh"
+
+    # --- 2. Accept license (== ./mqlicense.sh -accept) ----------------------
+    - name: Detect whether MQ is already installed
+      ansible.builtin.package_facts:
+        manager: rpm
+
+    - name: Accept the IBM MQ developer license
+      ansible.builtin.command: ./mqlicense.sh -accept
+      args:
+        chdir: "{{ mq_staging_dir }}/MQServer"
+      when: "'MQSeriesRuntime' not in ansible_facts.packages"
+      register: mqlicense
+      changed_when: mqlicense.rc == 0
+
+    # --- 3. Install RPMs (== rpm -ivh MQSeries...*.rpm) ----------------------
+    - name: Install IBM MQ RPM packages
+      ansible.builtin.shell:
+        cmd: "rpm -ivh {{ mq_packages | map('regex_replace', '$', '*.rpm') | join(' ') }}"
+        chdir: "{{ mq_staging_dir }}/MQServer"
+      when: "'MQSeriesRuntime' not in ansible_facts.packages"
+      register: rpm_install
+      changed_when: rpm_install.rc == 0
+
+    # --- 4. Set primary installation (== setmqinst -i -p /opt/mqm) ----------
+    - name: Set this as the primary MQ installation
+      ansible.builtin.command: "{{ mq_install_dir }}/bin/setmqinst -i -p {{ mq_install_dir }}"
+      register: setmqinst
+      changed_when: "'already the primary' not in (setmqinst.stdout | lower)"
+      failed_when: setmqinst.rc != 0 and 'already' not in (setmqinst.stdout | lower)
+
+    # --- 5. Report ----------------------------------------------------------
+    - name: Read installed MQ version
+      ansible.builtin.command: "{{ mq_install_dir }}/bin/dspmqver -b -f 2"
+      register: dspmqver
+      changed_when: false
+
+    - name: Show installed MQ version
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} → IBM MQ {{ dspmqver.stdout }} installed at {{ mq_install_dir }}"

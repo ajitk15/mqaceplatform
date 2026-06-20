@@ -1,0 +1,61 @@
+---
+###############################################################################
+# mq_ace_install_vars.yml — edit this, then run install_platform.yml
+#
+# Shared variables for install_mq.yml and install_ace.yml.
+# Pull in with:  ansible-playbook install_platform.yml
+###############################################################################
+
+# ---------------------------------------------------------------------------
+# Where do the binaries come from?
+#   "s3"    -> control node pulls them from a private S3 bucket (recommended)
+#   "local" -> archives already sit on the control node at *_local_path below
+# ---------------------------------------------------------------------------
+binary_source: "s3"
+
+# --- S3 source (used when binary_source == "s3") ----------------------------
+# Private bucket holding the installer archives. The Ansible control node's IAM
+# role has s3:GetObject on this bucket (policy "read-mq-ace-binaries").
+s3_bucket: "ibm-installers"
+mq_s3_key:  "9.4.5.0-IBM-MQ-Advanced-for-Developers-LinuxX64.tar.gz"
+ace_s3_key: "13.0.7.0-ACE-LINUX64-EVALUATION.tar.gz"
+
+# --- Local source (used when binary_source == "local") ----------------------
+# Absolute paths ON THE CONTROL NODE where you placed the archives.
+mq_local_path:  "/opt/staging/9.4.5.0-IBM-MQ-Advanced-for-Developers-LinuxX64.tar.gz"
+ace_local_path: "/opt/staging/13.0.7.0-ACE-LINUX64-EVALUATION.tar.gz"
+
+# ---------------------------------------------------------------------------
+# IBM MQ — Advanced for Developers (free dev edition)
+# Confirm the exact archive name/version you download from IBM and match here.
+# ---------------------------------------------------------------------------
+mq_version: "9.4.2.0"
+mq_install_dir: "/opt/mqm"
+mq_staging_dir: "/opt/mq-binaries"
+mq_queue_manager: "QM1"
+mq_listener_port: 1414
+# Developer convenience app/admin users + password (CHANGE for anything shared).
+mq_app_user: "app"
+mq_admin_user: "admin"
+mq_dev_password: "Passw0rd!"
+
+# ---------------------------------------------------------------------------
+# IBM App Connect Enterprise — Evaluation edition (13.0.7.0)
+# Installed under /opt/ibm/ace-<version>, run as the mqm user (in mqbrkrs group).
+# ---------------------------------------------------------------------------
+ace_version: "13.0.7.0"
+ace_install_parent: "/opt/ibm"
+ace_user: "mqm"
+ace_group: "mqbrkrs"
+ace_web_port: 4414            # integration node web admin UI port
+# Per-server integration node names (server2 -> NODE1, server3 -> NODE2)
+ace_node_map:
+  server2: "NODE1"
+  server3: "NODE2"
+
+# ---------------------------------------------------------------------------
+# Free-tier reality: t3.micro = 1 GB RAM. MQ/ACE want >= 2 GB.
+# Add a swapfile so the queue manager / integration server can at least start.
+# ---------------------------------------------------------------------------
+configure_swap: true
+swap_size_mb: 2048

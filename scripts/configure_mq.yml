@@ -1,0 +1,194 @@
+---
+###############################################################################
+# configure_mq.yml — create a queue manager + start the MQ Console (mqweb)
+#
+# Run AFTER install_mq.yml. The install playbook deliberately mirrors the manual
+# RPM install and stops at setmqinst; this playbook does the runtime config.
+#
+#   ansible-playbook -i /etc/ansible/hosts configure_mq.yml
+###############################################################################
+
+- name: Configure IBM MQ — queue manager, dev objects, web console
+  hosts: all_mq_servers
+  become: true
+  gather_facts: false
+  vars_files:
+    - mq_ace_install_vars.yml
+
+  tasks:
+    # --- Queue manager (crtmqm + strmqm, idempotent) ------------------------
+    - name: Check whether the queue manager exists
+      ansible.builtin.command: "{{ mq_install_dir }}/bin/dspmq -m {{ mq_queue_manager }}"
+      become_user: mqm
+      register: dspmq
+      changed_when: false
+      failed_when: false
+
+    - name: Create the queue manager
+      ansible.builtin.command: "{{ mq_install_dir }}/bin/crtmqm {{ mq_queue_manager }}"
+      become_user: mqm
+      when: "mq_queue_manager not in dspmq.stdout"
+
+    - name: Start the queue manager
+      ansible.builtin.command: "{{ mq_install_dir }}/bin/strmqm {{ mq_queue_manager }}"
+      become_user: mqm
+      register: strmqm
+      changed_when: "'already running' not in (strmqm.stdout | lower)"
+      failed_when: strmqm.rc not in [0, 5]    # rc 5 = already running
+
+    - name: Render developer MQSC config
+      ansible.builtin.copy:
+        dest: /tmp/dev-config.mqsc
+        mode: "0644"
+        content: |
+          DEFINE LISTENER('DEV.LISTENER.TCP') TRPTYPE(TCP) PORT({{ mq_listener_port }}) CONTROL(QMGR) REPLACE
+          START LISTENER('DEV.LISTENER.TCP')
+          DEFINE QLOCAL('DEV.QUEUE.1') REPLACE
+          DEFINE CHANNEL('DEV.APP.SVRCONN') CHLTYPE(SVRCONN) REPLACE
+          DEFINE CHANNEL('DEV.ADMIN.SVRCONN') CHLTYPE(SVRCONN) MCAUSER('{{ mq_admin_user }}') REPLACE
+
+    - name: Apply developer MQSC config
+      ansible.builtin.shell: "{{ mq_install_dir }}/bin/runmqsc {{ mq_queue_manager }} < /tmp/dev-config.mqsc"
+      become_user: mqm
+      register: runmqsc
+      changed_when: true
+
+    - name: Create systemd unit for the queue manager
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/mq-{{ mq_queue_manager }}.service"
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=IBM MQ Queue Manager {{ mq_queue_manager }}
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=forking
+          User=mqm
+          ExecStart={{ mq_install_dir }}/bin/strmqm {{ mq_queue_manager }}
+          ExecStop={{ mq_install_dir }}/bin/endmqm -w {{ mq_queue_manager }}
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable queue manager service on boot
+      ansible.builtin.systemd:
+        name: "mq-{{ mq_queue_manager }}"
+        enabled: true
+        daemon_reload: true
+
+    # --- MQ Console / REST API (mqweb) --------------------------------------
+    - name: Locate the mqweb server config directory
+      ansible.builtin.shell: |
+        set -o pipefail
+        find /var/mqm/web/installations -maxdepth 3 -type d -name mqweb | head -1
+      args:
+        executable: /bin/bash
+      register: mqweb_dir
+      changed_when: false
+
+    - name: Fail if mqweb is not installed
+      ansible.builtin.assert:
+        that: mqweb_dir.stdout | length > 0
+        fail_msg: "mqweb dir not found — is the MQSeriesWeb RPM installed?"
+
+    - name: Write mqwebuser.xml (single admin user, remote access enabled)
+      ansible.builtin.copy:
+        dest: "{{ mqweb_dir.stdout }}/mqwebuser.xml"
+        owner: mqm
+        group: mqm
+        mode: "0640"
+        content: |
+          <?xml version="1.0" encoding="UTF-8"?>
+          <server>
+            <featureManager>
+              <feature>appSecurity-2.0</feature>
+              <feature>basicAuthenticationMQ-1.0</feature>
+            </featureManager>
+
+            <enterpriseApplication id="com.ibm.mq.console">
+              <application-bnd>
+                <security-role name="MQWebAdmin">
+                  <user name="{{ mq_admin_user }}" realm="defaultRealm"/>
+                </security-role>
+              </application-bnd>
+            </enterpriseApplication>
+
+            <enterpriseApplication id="com.ibm.mq.rest">
+              <application-bnd>
+                <security-role name="MQWebAdmin">
+                  <user name="{{ mq_admin_user }}" realm="defaultRealm"/>
+                </security-role>
+              </application-bnd>
+            </enterpriseApplication>
+
+            <basicRegistry id="basic" realm="defaultRealm">
+              <user name="{{ mq_admin_user }}" password="{{ mq_dev_password }}"/>
+            </basicRegistry>
+
+            <variable name="httpHost" value="*"/>
+          </server>
+      register: mqwebuser
+
+    - name: Check whether mqweb is running
+      ansible.builtin.command: "{{ mq_install_dir }}/bin/dspmqweb status"
+      become_user: mqm
+      register: dspmqweb
+      changed_when: false
+      failed_when: false
+
+    - name: Start mqweb if not running
+      ansible.builtin.command: "{{ mq_install_dir }}/bin/strmqweb"
+      become_user: mqm
+      when: "'Running' not in dspmqweb.stdout"
+      register: strmqweb
+      changed_when: strmqweb.rc == 0
+      failed_when: strmqweb.rc != 0 and 'already running' not in (strmqweb.stdout | lower)
+
+    - name: Restart mqweb if its config changed
+      ansible.builtin.shell: "{{ mq_install_dir }}/bin/endmqweb; {{ mq_install_dir }}/bin/strmqweb"
+      become_user: mqm
+      when: mqwebuser is changed and "'Running' in dspmqweb.stdout"
+      changed_when: true
+
+    - name: Create systemd unit so mqweb starts on boot
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/mqweb.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=IBM MQ Web Server (Console + REST API)
+          After=network-online.target mq-{{ mq_queue_manager }}.service
+          Wants=network-online.target
+
+          [Service]
+          Type=forking
+          User=mqm
+          ExecStart={{ mq_install_dir }}/bin/strmqweb
+          ExecStop={{ mq_install_dir }}/bin/endmqweb
+          Restart=on-failure
+          RestartSec=10
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable mqweb service on boot
+      ansible.builtin.systemd:
+        name: mqweb
+        enabled: true
+        daemon_reload: true
+
+    - name: Wait for the MQ Console HTTPS port
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 9443
+        timeout: 90
+        state: started
+
+    - name: Show MQ Console URL + login
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} → https://{{ ansible_host | default(inventory_hostname) }}:9443/ibmmq/console/
+          (login: {{ mq_admin_user }} / {{ mq_dev_password }})

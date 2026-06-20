@@ -1,0 +1,21 @@
+# Terraform state – may contain secrets; use remote backend
+*.tfstate
+*.tfstate.backup
+*.tfstate.*.backup
+
+# Terraform working directory
+.terraform/
+.terraform.lock.hcl
+
+# Generated SSH private key – NEVER commit this
+*.pem
+
+# Generated inventory (contains IP addresses)
+inventory/hosts.ini
+
+# Override files
+terraform.tfvars
+*.auto.tfvars
+
+# Crash log
+crash.log

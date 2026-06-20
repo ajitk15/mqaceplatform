@@ -1,0 +1,15 @@
+---
+###############################################################################
+# install_platform.yml — top-level orchestration
+#
+# Installs IBM MQ on all MQ servers, then ACE on the MQ+ACE servers.
+# Edit mq_ace_install_vars.yml first (binary source, versions, S3 keys).
+#
+# Run from the Ansible Control Node:
+#   cd /etc/ansible/playbooks
+#   ansible-playbook install_platform.yml
+###############################################################################
+
+- import_playbook: install_mq.yml      # install MQ (mirrors the manual RPM install)
+- import_playbook: configure_mq.yml    # create queue manager + start MQ Console
+- import_playbook: install_ace.yml      # install ACE on the MQ+ACE servers

@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ns2:appDescriptor xmlns:ns2="http://com.ibm.etools.mft.descriptor.app" xmlns="http://com.ibm.etools.mft.descriptor.base">
+  <references/>
+</ns2:appDescriptor>

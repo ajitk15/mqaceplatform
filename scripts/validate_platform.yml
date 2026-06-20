@@ -1,0 +1,119 @@
+---
+###############################################################################
+# validate_platform.yml — platform health validation rendered to a static
+# HTML dashboard served over HTTP.
+#
+#   MQ servers (all_mq_servers):  MQ version · ALL queue managers · MQ Web (link)
+#   ACE servers (mq_ace):         ACE installation · node name · ACE Web (link)
+#
+# Output: /home/ec2-user/validate-www/index.html  (served on port 8090)
+###############################################################################
+
+- name: Collect IBM MQ status from all MQ servers
+  hosts: all_mq_servers
+  become: true
+  gather_facts: false
+  vars_files:
+    - mq_ace_install_vars.yml
+
+  tasks:
+    - name: Get public IP (IMDSv2)
+      ansible.builtin.shell: |
+        TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 120")
+        curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4
+      register: c_pubip
+      changed_when: false
+      failed_when: false
+
+    - name: MQ installed version (dspmqver)
+      ansible.builtin.command: "{{ mq_install_dir }}/bin/dspmqver -b -f 2"
+      register: c_mq_ver
+      changed_when: false
+      failed_when: false
+
+    - name: List ALL queue managers (name|status)
+      ansible.builtin.shell: |
+        {{ mq_install_dir }}/bin/dspmq | sed -n 's/QMNAME(\([^)]*\)).*STATUS(\([^)]*\)).*/\1|\2/p'
+      become_user: mqm
+      register: c_qmgrs
+      changed_when: false
+      failed_when: false
+
+    - name: MQ Web console status (dspmqweb)
+      ansible.builtin.command: "{{ mq_install_dir }}/bin/dspmqweb status"
+      become_user: mqm
+      register: c_mq_web
+      changed_when: false
+      failed_when: false
+
+    - name: Record MQ facts
+      ansible.builtin.set_fact:
+        public_ip: "{{ c_pubip.stdout | trim }}"
+        mq_installed: "{{ (c_mq_ver.rc == 0 and '9.' in c_mq_ver.stdout) | bool }}"
+        mq_version: "{{ c_mq_ver.stdout | trim | regex_replace('^Version:\\s*', '') }}"
+        qmgr_lines: "{{ c_qmgrs.stdout_lines | default([]) }}"
+        mq_web_ok: "{{ ('running' in (c_mq_web.stdout | lower)) | bool }}"
+        is_ace: false
+
+- name: Collect IBM ACE status from MQ+ACE servers
+  hosts: mq_ace
+  become: true
+  gather_facts: false
+  vars_files:
+    - mq_ace_install_vars.yml
+  vars:
+    node_name: "{{ ace_node_map[inventory_hostname] | default('NODE') }}"
+
+  tasks:
+    - name: ACE installed (mqsiservice present)
+      ansible.builtin.shell: "ls {{ ace_install_parent }}/ace-*/server/bin/mqsiservice 2>/dev/null | head -1"
+      register: c_ace_install
+      changed_when: false
+      failed_when: false
+
+    - name: ACE integration node active
+      ansible.builtin.command: "systemctl is-active ace-{{ node_name }}"
+      register: c_ace_node
+      changed_when: false
+      failed_when: false
+
+    - name: ACE webui port listening
+      ansible.builtin.shell: "ss -ltn | grep -q ':{{ ace_web_port }} '"
+      register: c_ace_web
+      changed_when: false
+      failed_when: false
+
+    - name: Record ACE facts
+      ansible.builtin.set_fact:
+        is_ace: true
+        ace_node_name: "{{ node_name }}"
+        ace_web_port: "{{ ace_web_port }}"
+        ace_installed: "{{ (c_ace_install.rc == 0 and (c_ace_install.stdout | length) > 0) | bool }}"
+        ace_version_str: "{{ c_ace_install.stdout | regex_search('ace-([0-9][0-9.]+)', '\\1') | default('', true) }}"
+        ace_node_ok: "{{ ((c_ace_node.stdout | trim) == 'active') | bool }}"
+        ace_web_ok: "{{ (c_ace_web.rc == 0) | bool }}"
+
+- name: Render HTML dashboard on the control node
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  vars:
+    dashboard_dir: "/home/ec2-user/validate-www"
+    mq_web_port: 9443
+
+  tasks:
+    - name: Ensure dashboard directory exists
+      ansible.builtin.file:
+        path: "{{ dashboard_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Render the status dashboard
+      ansible.builtin.template:
+        src: validate_dashboard.html.j2
+        dest: "{{ dashboard_dir }}/index.html"
+        mode: "0644"
+
+    - name: Dashboard written
+      ansible.builtin.debug:
+        msg: "Dashboard updated at {{ dashboard_dir }}/index.html ({{ ansible_date_time.iso8601 }})"
