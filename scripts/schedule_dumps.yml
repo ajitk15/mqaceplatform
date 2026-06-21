@@ -1,7 +1,7 @@
 ---
 ###############################################################################
 # schedule_dumps.yml — deploy the MQ/ACE config extractors onto the Ansible
-# control node and schedule them to run every hour.
+# control node and schedule them to run every 30 minutes.
 #
 # Run ONCE, on the control node itself, from this scripts/ directory:
 #   ansible-playbook schedule_dumps.yml
@@ -10,7 +10,7 @@
 #   /opt/apps/mqaceserver/playbooks/   ← extract_qmgr_dump.yml, extract_node_dump.yml,
 #                                         mq_ace_install_vars.yml
 #   /opt/apps/mqaceserver/run_dumps.sh ← wrapper that runs both extractors
-#   /etc/cron.d/mqace-dumps            ← runs run_dumps.sh at minute 0 every hour
+#   /etc/cron.d/mqace-dumps            ← runs run_dumps.sh every 30 min (minute 0,30)
 #   /opt/apps/mqaceserver/resources/   ← consolidated qmgr_dump.csv, node_dump.csv,
 #                                         node_config.csv (written by each run)
 #
@@ -57,12 +57,12 @@
         dest: "{{ app_root }}/run_dumps.sh"
         mode: "0755"
 
-    - name: Schedule the dumps every hour (writes /etc/cron.d/mqace-dumps)
+    - name: Schedule the dumps every 30 minutes (writes /etc/cron.d/mqace-dumps)
       ansible.builtin.cron:
         name: "mqace-config-dumps"
         cron_file: mqace-dumps
         user: "{{ cron_user }}"
-        minute: "0"
+        minute: "0,30"
         hour: "*"
         job: >-
           MQACE_PLAYBOOK_DIR={{ playbook_install_dir }}
@@ -74,6 +74,6 @@
       ansible.builtin.debug:
         msg:
           - "Extractors installed in {{ playbook_install_dir }}"
-          - "Hourly cron (minute 0) → {{ app_root }}/run_dumps.sh"
+          - "Cron every 30 min (minute 0,30) → {{ app_root }}/run_dumps.sh"
           - "Consolidated CSVs will be written to {{ resources_dir }}"
           - "Run now to verify: {{ app_root }}/run_dumps.sh"

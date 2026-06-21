@@ -46,6 +46,8 @@
     # t3.micro has ~1 GB RAM; a swapfile keeps the install/runtime healthy.
     configure_swap: true
     swap_size_mb: 2048
+    # OS password for the mqm service account (created by the MQ RPMs).
+    mqm_os_password: "mqmpass"
 
   tasks:
     # --- 0. Swap (free-tier RAM mitigation) ---------------------------------
@@ -119,6 +121,14 @@
       register: setmqinst
       changed_when: "'already the primary' not in (setmqinst.stdout | lower)"
       failed_when: setmqinst.rc != 0 and 'already' not in (setmqinst.stdout | lower)
+
+    # --- 4b. Set the mqm account password (mqmpass) -------------------------
+    # The mqm user is created by the MQSeriesRuntime RPM. chpasswd avoids needing
+    # passlib on the control node (no password_hash filter).
+    - name: Set the mqm OS user password
+      ansible.builtin.shell: "echo 'mqm:{{ mqm_os_password }}' | chpasswd"
+      no_log: true
+      changed_when: true
 
     # --- 5. Report ----------------------------------------------------------
     - name: Read installed MQ version

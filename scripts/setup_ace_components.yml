@@ -80,7 +80,10 @@
       become_user: "{{ ace_user }}"
       register: ace_setup_run
       changed_when: true
-      failed_when: ace_setup_run.rc != 0
+      # The integration servers are created by mqsicreateexecutiongroup; only the
+      # BAR *deploy* can time out (BIP8286E) on a 1 GB t3.micro. Treat that timeout
+      # as non-fatal — the demo BARs are best-effort and users deploy their own.
+      failed_when: ace_setup_run.rc != 0 and 'BIP8286E' not in (ace_setup_run.stdout | default(''))
 
     - name: Show the setup output
       ansible.builtin.debug:

@@ -48,11 +48,11 @@
 
     - name: Record MQ facts
       ansible.builtin.set_fact:
-        public_ip: "{{ c_pubip.stdout | trim }}"
-        mq_installed: "{{ (c_mq_ver.rc == 0 and '9.' in c_mq_ver.stdout) | bool }}"
-        mq_version: "{{ c_mq_ver.stdout | trim | regex_replace('^Version:\\s*', '') }}"
+        public_ip: "{{ c_pubip.stdout | default('') | trim }}"
+        mq_installed: "{{ ((c_mq_ver.rc | default(1)) == 0 and '9.' in (c_mq_ver.stdout | default(''))) | bool }}"
+        mq_version: "{{ (c_mq_ver.stdout | default('')) | trim | regex_replace('^Version:\\s*', '') }}"
         qmgr_lines: "{{ c_qmgrs.stdout_lines | default([]) }}"
-        mq_web_ok: "{{ ('running' in (c_mq_web.stdout | lower)) | bool }}"
+        mq_web_ok: "{{ ('running' in (c_mq_web.stdout | default('') | lower)) | bool }}"
         is_ace: false
 
 - name: Collect IBM ACE status from MQ+ACE servers
@@ -102,11 +102,71 @@
     mq_web_port: 9443
 
   tasks:
+    - name: Control node — public IP (IMDSv2)
+      ansible.builtin.shell: |
+        TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 120")
+        curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4
+      register: ctl_pubip
+      changed_when: false
+      failed_when: false
+
+    - name: Control node — ansible version (first line)
+      ansible.builtin.shell: "ansible --version 2>/dev/null | head -1"
+      register: ctl_ansible
+      changed_when: false
+      failed_when: false
+
+    - name: Control node — cron jobs and their last run time
+      ansible.builtin.shell: |
+        emit() {   # name | schedule | last-run
+          name="$1"; file="$2"; logpath="$3"
+          sched="(not configured)"
+          [ -f "$file" ] && sched="$(grep -hoE '^[0-9*,/ ]+' "$file" | head -1 | xargs)"
+          last="never"
+          [ -e "$logpath" ] && last="$(date -r "$logpath" '+%Y-%m-%d %H:%M:%S %Z')"
+          echo "$name|$sched|$last"
+        }
+        emit "Validation dashboard (validate_platform.yml)" /etc/cron.d/mq-ace-validate /home/ec2-user/validate-www/index.html
+        dlog="$(ls -1t /var/log/mqace-dumps/run-*.log 2>/dev/null | head -1)"
+        emit "Config dumps (extract_qmgr/node_dump.yml)" /etc/cron.d/mqace-dumps "${dlog:-/opt/apps/mqaceserver/resources/qmgr_dump.csv}"
+      register: ctl_crons
+      changed_when: false
+      failed_when: false
+
+    - name: Record control-node facts for the dashboard
+      ansible.builtin.set_fact:
+        ctl_hostname: "{{ ansible_hostname | default('control') }}"
+        ctl_public_ip: "{{ ctl_pubip.stdout | default('') | trim }}"
+        ctl_private_ip: "{{ ansible_default_ipv4.address | default('') }}"
+        ctl_os: "{{ ansible_distribution | default('') }} {{ ansible_distribution_version | default('') }}"
+        ctl_ansible_ver: "{{ ctl_ansible.stdout | default('') | trim }}"
+        ctl_playbook_dir: "{{ playbook_dir }}"
+        ctl_cron_lines: "{{ ctl_crons.stdout_lines | default([]) }}"
+
     - name: Ensure dashboard directory exists
       ansible.builtin.file:
         path: "{{ dashboard_dir }}"
         state: directory
         mode: "0755"
+
+    - name: Publish the latest config-dump CSVs into the web dir (for download)
+      ansible.builtin.shell: |
+        src=/opt/apps/mqaceserver/resources
+        for f in qmgr_dump.csv node_dump.csv node_config.csv; do
+          if [ -f "$src/$f" ]; then
+            install -m 0644 "$src/$f" "{{ dashboard_dir }}/$f"
+            sz=$(du -h "$src/$f" | cut -f1)
+            ts=$(date -r "$src/$f" '+%Y-%m-%d %H:%M:%S %Z')
+            echo "$f|$sz|$ts"
+          fi
+        done
+      register: ctl_csvs
+      changed_when: false
+      failed_when: false
+
+    - name: Record published CSV list
+      ansible.builtin.set_fact:
+        ctl_csv_files: "{{ ctl_csvs.stdout_lines | default([]) }}"
 
     - name: Render the status dashboard
       ansible.builtin.template:

@@ -52,6 +52,9 @@
       become_user: mqm
       register: runmqsc
       changed_when: true
+      # rc 10 = MQSC completed with warnings (e.g. AMQ8730W listener already
+      # active on re-run); only a genuine error rc should fail the task.
+      failed_when: runmqsc.rc not in [0, 10]
 
     - name: Create systemd unit for the queue manager
       ansible.builtin.copy:
@@ -79,6 +82,14 @@
         enabled: true
         daemon_reload: true
 
+- name: Enable the MQ Web Console (mqweb) on every MQ server
+  hosts: all_mq_servers      # MQ Console must come up on server1, server2 and server3
+  become: true
+  gather_facts: false
+  vars_files:
+    - mq_ace_install_vars.yml
+
+  tasks:
     # --- MQ Console / REST API (mqweb) --------------------------------------
     - name: Locate the mqweb server config directory
       ansible.builtin.shell: |
@@ -108,24 +119,54 @@
               <feature>basicAuthenticationMQ-1.0</feature>
             </featureManager>
 
-            <enterpriseApplication id="com.ibm.mq.console">
+          <enterpriseApplication id="com.ibm.mq.console">
               <application-bnd>
-                <security-role name="MQWebAdmin">
-                  <user name="{{ mq_admin_user }}" realm="defaultRealm"/>
-                </security-role>
+                  <security-role name="MQWebAdmin">
+                      <group name="MQWebAdminGroup" realm="defaultRealm"/>
+                  </security-role>
+                  <security-role name="MQWebAdminRO">
+                      <user name="mqreader" realm="defaultRealm"/>
+                  </security-role>
+                  <security-role name="MQWebUser">
+                      <special-subject type="ALL_AUTHENTICATED_USERS"/>
+                  </security-role>
+                  <security-role name="MFTWebAdmin">
+                      <user name="mftadmin" realm="defaultRealm"/>
+                  </security-role>
+                  <security-role name="MFTWebAdminRO">
+                      <user name="mftreader" realm="defaultRealm"/>
+                  </security-role>
               </application-bnd>
-            </enterpriseApplication>
+          </enterpriseApplication>
 
             <enterpriseApplication id="com.ibm.mq.rest">
-              <application-bnd>
-                <security-role name="MQWebAdmin">
-                  <user name="{{ mq_admin_user }}" realm="defaultRealm"/>
-                </security-role>
-              </application-bnd>
+                <application-bnd>
+                    <security-role name="MQWebAdmin">
+                        <group name="MQWebAdminGroup" realm="defaultRealm"/>
+                    </security-role>
+                    <security-role name="MQWebAdminRO">
+                        <user name="mqreader" realm="defaultRealm"/>
+                    </security-role>
+                    <security-role name="MQWebUser">
+                        <special-subject type="ALL_AUTHENTICATED_USERS"/>
+                    </security-role>
+                    <security-role name="MFTWebAdmin">
+                        <user name="mftadmin" realm="defaultRealm"/>
+                    </security-role>
+                    <security-role name="MFTWebAdminRO">
+                        <user name="mftreader" realm="defaultRealm"/>
+                    </security-role>
+                </application-bnd>
             </enterpriseApplication>
-
-            <basicRegistry id="basic" realm="defaultRealm">
-              <user name="{{ mq_admin_user }}" password="{{ mq_dev_password }}"/>
+          
+          <basicRegistry id="basic" realm="defaultRealm">
+                <user name="mqadmin" password="{{ mq_admin_password }}"/>
+                <user name="mqreader" password="{{ mq_reader_password }}"/>
+                <user name="mftadmin" password="{{ mft_admin_password }}"/>
+                <user name="mftreader" password="{{ mft_reader_password }}"/>
+                <group name="MQWebAdminGroup">
+                  <member name="mqadmin"/>
+                </group>
             </basicRegistry>
 
             <variable name="httpHost" value="*"/>
@@ -179,6 +220,14 @@
         name: mqweb
         enabled: true
         daemon_reload: true
+
+    - name: Ensure the MQ Console port is open in firewalld
+      ansible.builtin.shell: |
+        systemctl enable --now firewalld
+        firewall-cmd --permanent --add-port=9443/tcp
+        firewall-cmd --reload
+      register: mqweb_fw
+      changed_when: "'ALREADY_ENABLED' not in mqweb_fw.stderr"
 
     - name: Wait for the MQ Console HTTPS port
       ansible.builtin.wait_for:

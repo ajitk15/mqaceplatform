@@ -40,6 +40,10 @@ mq_listener_port: 1415
 mq_app_user: "app"
 mq_admin_user: "admin"
 mq_dev_password: "Passw0rd!"
+mq_admin_password: "mqadmin"
+mq_reader_password: "mqreader"
+mft_admin_password: "mftadmin"
+mft_reader_password: "mftreader"
 
 # ---------------------------------------------------------------------------
 # IBM App Connect Enterprise — Evaluation edition (13.0.7.0)

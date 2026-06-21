@@ -350,15 +350,31 @@ resource "terraform_data" "deploy_playbooks" {
     destination = "/home/${var.rhel_user}"
   }
 
-  # Wait for the bootstrap (cloud-init) to finish, then move the playbooks into
-  # place under /etc/ansible/playbooks.
+  # Move the playbooks into place under /etc/ansible/playbooks and launch the
+  # full platform install as a DETACHED background unit, then return immediately.
+  #
+  # Crucially this does NOT hold the SSH session open waiting for cloud-init:
+  # the control node's bootstrap compiles Python from source (~20 min on
+  # t3.micro), and keeping one provisioner SSH channel open that long is fragile
+  # (the session can drop with "remote command exited without exit status").
+  # Instead, run_platform_install.sh itself does `cloud-init status --wait` first,
+  # so the long wait happens inside the detached systemd unit. The install
+  # (MQ + queue managers + MQ Console + ACE + integration nodes/servers) plus the
+  # every-2-min validation cron all run as part of `terraform apply`; the
+  # dashboard on :8090 tracks progress as the nodes come up.
   provisioner "remote-exec" {
     inline = [
-      "sudo cloud-init status --wait || true",
       "sudo mkdir -p /etc/ansible/playbooks",
       "sudo cp -r /home/${var.rhel_user}/scripts/. /etc/ansible/playbooks/",
       "sudo chown -R root:root /etc/ansible/playbooks",
+      "sudo install -m 0755 /etc/ansible/playbooks/run_platform_install.sh /usr/local/bin/run_platform_install.sh",
+      "sudo install -m 0755 /etc/ansible/playbooks/run_validate.sh /usr/local/bin/run_validate.sh",
       "echo 'Playbooks deployed to /etc/ansible/playbooks/'",
+      # Detached transient unit: survives this SSH session; apply returns at once.
+      "sudo systemctl stop platform-install.service 2>/dev/null || true",
+      "sudo systemctl reset-failed platform-install.service 2>/dev/null || true",
+      "sudo systemd-run --unit=platform-install --collect --description='MQ/ACE platform install' /usr/local/bin/run_platform_install.sh",
+      "echo 'Platform install launched (waits for cloud-init internally). Watch: sudo journalctl -u platform-install -f  or  tail -f /var/log/platform-install.log'",
     ]
   }
 }

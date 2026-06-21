@@ -14,4 +14,5 @@
 - import_playbook: setup_mq_components.yml  # create per-server QMs + ACECLUSTER from scripts/mqsetup
 - import_playbook: configure_mq.yml         # create dev QM (QM1) + start MQ Console
 - import_playbook: install_ace.yml          # install ACE on the MQ+ACE servers
-- import_playbook: setup_ace_components.yml # create integration servers + deploy demo BARs from scripts/acesetup
+- import_playbook: schedule_dumps.yml       # control node: every-30-min qmgr/node config dumps cron (before optional demo BARs so it always installs)
+- import_playbook: setup_ace_components.yml # create integration servers + deploy demo BARs (best-effort; may time out on t3.micro)

@@ -48,6 +48,7 @@ dnf install -y \
   xz-devel sqlite-devel readline-devel \
   net-tools bind-utils \
   firewalld \
+  cronie \
   git vim \
   awscli2 \
   sshpass
@@ -72,12 +73,19 @@ ln -sf /usr/local/bin/python$${PYTHON_VERSION} /usr/local/bin/python3
 ln -sf /usr/local/bin/pip$${PYTHON_VERSION}    /usr/local/bin/pip3
 python3 --version
 
-echo "=== [4/10] Install Ansible via pip ==="
+echo "=== [4/10] Install Ansible ==="
+# Prefer RHEL AppStream ansible-core (2.14) — the proven binary for these
+# playbooks; it lands at /usr/bin/ansible-playbook. Non-fatal if unavailable:
+# run_platform_install.sh falls back to the pip build below.
+dnf install -y ansible-core || echo "ansible-core via dnf unavailable; using pip ansible"
+
+# pip ansible (newer) + boto3/botocore for AWS modules and the S3 installer pull.
 /usr/local/bin/pip3 install --upgrade pip
 /usr/local/bin/pip3 install ansible ansible-lint paramiko boto3 botocore
 
 # FIX #14 – verify using explicit path; not dependent on $PATH being set
 /usr/local/bin/ansible --version
+command -v /usr/bin/ansible-playbook >/dev/null && /usr/bin/ansible-playbook --version || true
 
 echo "=== [5/10] Fetch SSH private key from SSM Parameter Store (Fix #1 & #4) ==="
 # The key is never in user_data or any shell variable – fetched securely at runtime.
@@ -126,18 +134,25 @@ retry_files_enabled = False
 # default callback with YAML-formatted results instead.
 stdout_callback     = ansible.builtin.default
 result_format       = yaml
-interpreter_python  = /usr/local/bin/python3
+# Use RHEL's system Python (3.9) for Ansible modules — NOT the source-built 3.13.
+# ansible-core 2.14's get_url/urls module passes cert_file/key_file to
+# http.client.HTTPSConnection, which Python 3.12+ removed, breaking every HTTPS
+# download on the targets. System 3.9 is the proven, compatible interpreter.
+interpreter_python  = /usr/bin/python3
 
 [ssh_connection]
 ssh_args            = -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
 pipelining          = True
 CFG
 
-# Set the Python interpreter for all Ansible playbooks
+# Set the Python interpreter for all Ansible playbooks. Use the RHEL system
+# Python 3.9 (/usr/bin/python3): ansible-core 2.14 modules (get_url) are
+# incompatible with the source-built Python 3.13 (cert_file kwarg removed in
+# 3.12+). The 3.13 build remains available for the chatbot/MCP if needed.
 mkdir -p /etc/ansible/group_vars
 cat > /etc/ansible/group_vars/all.yml << GVARS
 ---
-ansible_python_interpreter: /usr/local/bin/python3
+ansible_python_interpreter: /usr/bin/python3
 GVARS
 
 echo "=== [7/10] Enable firewalld and open ports ==="

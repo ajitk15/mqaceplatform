@@ -103,9 +103,18 @@
       ansible.builtin.command: "chmod -R ug=rwx,o=rx {{ ace_home }}"
       changed_when: false
 
-    - name: Add mqsiprofile to mqm's .bash_profile
+    - name: Look up the mqm account's real home directory
+      ansible.builtin.command: "getent passwd {{ ace_user }}"
+      register: ace_user_pw
+      changed_when: false
+
+    - name: Record mqm home (MQ creates mqm with home /var/mqm, not /home/mqm)
+      ansible.builtin.set_fact:
+        ace_user_home: "{{ ace_user_pw.stdout.split(':')[5] }}"
+
+    - name: Add mqsiprofile to mqm's .bash_profile so mqsi* commands work on login
       ansible.builtin.lineinfile:
-        path: "/home/{{ ace_user }}/.bash_profile"
+        path: "{{ ace_user_home }}/.bash_profile"
         line: ". {{ mqsiprofile }}"
         create: true
         owner: "{{ ace_user }}"

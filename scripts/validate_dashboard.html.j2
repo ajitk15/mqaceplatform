@@ -9,12 +9,25 @@
     body { font-family: -apple-system, Segoe UI, Arial, sans-serif; margin: 2rem; background: #f4f6f8; color: #222; }
     h1 { margin: 0 0 .2rem; }
     .ts { color: #666; margin-bottom: 1.5rem; font-size: .9rem; }
-    .cards { display: flex; flex-wrap: wrap; gap: 1.5rem; align-items: flex-start; }
-    .card { background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.12); border-radius: 6px; overflow: hidden; min-width: 360px; }
+    .cards {
+      display: grid;
+      grid-template-columns: 1.05fr 1fr 1fr;
+      grid-template-areas:
+        "ansible server1 server1"
+        "ansible server2 server3";
+      gap: 1.5rem;
+      align-items: start;
+      max-width: 1600px;
+    }
+    /* Narrow screens: stack everything in one column. */
+    @media (max-width: 1100px) {
+      .cards { grid-template-columns: 1fr; grid-template-areas: "ansible" "server1" "server2" "server3"; }
+    }
+    .card { background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.12); border-radius: 6px; overflow: hidden; }
     .card h2 { margin: 0; padding: .7rem 1rem; background: #2d3e50; color: #fff; font-size: 1.05rem; }
     .card h2 small { font-weight: 400; opacity: .8; }
     table { border-collapse: collapse; width: 100%; }
-    th, td { padding: .5rem 1rem; border-bottom: 1px solid #eee; text-align: left; font-size: .92rem; }
+    th, td { padding: .5rem 1rem; border-bottom: 1px solid #eee; text-align: left; font-size: .92rem; overflow-wrap: anywhere; }
     th { background: #eef1f4; font-size: .78rem; text-transform: uppercase; letter-spacing: .03em; }
     .sec { padding: .45rem 1rem; background: #f7f9fb; font-weight: 700; font-size: .8rem; text-transform: uppercase; color: #557; }
     .badge { font-weight: 700; border-radius: 4px; padding: .12rem .55rem; font-size: .82rem; }
@@ -30,11 +43,50 @@
   <h1>IBM MQ / ACE Platform Status</h1>
   <div class="ts">Last updated: {{ ansible_date_time.iso8601 }} &nbsp;·&nbsp; auto-refresh every 60s</div>
   <div class="cards">
+    <div class="card" style="grid-area: ansible;">
+      <h2>Ansible Control Node <small>{% if ctl_public_ip | default('') %}· {{ ctl_public_ip }}{% endif %}</small></h2>
+      <table>
+        <tr><th>Item</th><th>Detail</th></tr>
+
+        <tr class="sec"><td colspan="2">Server details</td></tr>
+        <tr><td>Hostname</td><td>{{ ctl_hostname | default('—') }}</td></tr>
+        <tr><td>Public IP</td><td>{{ ctl_public_ip | default('') or '—' }}</td></tr>
+        <tr><td>Private IP</td><td>{{ ctl_private_ip | default('') or '—' }}</td></tr>
+        <tr><td>OS</td><td>{{ ctl_os | default('') | trim or '—' }}</td></tr>
+        <tr><td>Ansible</td><td>{{ ctl_ansible_ver | default('') or '—' }}</td></tr>
+
+        <tr class="sec"><td colspan="2">Playbooks</td></tr>
+        <tr><td>Playbook location</td><td><code>{{ ctl_playbook_dir | default('/etc/ansible/playbooks') }}</code></td></tr>
+        <tr><td>Dump playbooks</td><td><code>/opt/apps/mqaceserver/playbooks</code></td></tr>
+
+        <tr class="sec"><td colspan="2">Cron jobs &amp; last run</td></tr>
+        {% for c in ctl_cron_lines | default([]) %}
+          {% set parts = c.split('|') %}
+          <tr>
+            <td>{{ parts[0] }}<br><span class="muted">schedule: <code>{{ parts[1] | default('') }}</code></span></td>
+            <td><span class="badge {{ 'FAIL' if (parts[2] | default('never') == 'never') else 'PASS' }}">{{ 'last run: ' ~ parts[2] if (parts[2] | default('never') != 'never') else 'never run' }}</span></td>
+          </tr>
+        {% else %}
+          <tr><td colspan="2" class="muted">No cron jobs found</td></tr>
+        {% endfor %}
+
+        <tr class="sec"><td colspan="2">Config dump downloads</td></tr>
+        {% for c in ctl_csv_files | default([]) %}
+          {% set f = c.split('|') %}
+          <tr>
+            <td>{{ f[0] }}<br><span class="muted">{{ f[1] | default('') }} · updated {{ f[2] | default('') }}</span></td>
+            <td><a class="link" href="{{ f[0] }}" download>download</a></td>
+          </tr>
+        {% else %}
+          <tr><td colspan="2" class="muted">No dump CSVs yet (run every 30 min)</td></tr>
+        {% endfor %}
+      </table>
+    </div>
   {% for host in groups['all_mq_servers'] | sort %}
   {% set hv = hostvars[host] %}
   {% set pub = hv.public_ip | default('') %}
   {% set ace = hv.is_ace | default(false) | bool %}
-    <div class="card">
+    <div class="card" style="grid-area: {{ host }};">
       <h2>{{ host }} <small>— {{ 'MQ + ACE' if ace else 'MQ' }}{% if pub %} · {{ pub }}{% endif %}</small></h2>
       <table>
         <tr><th>Item</th><th>Status</th></tr>
