@@ -12,10 +12,10 @@
 # PYTHON_BIN is pinned to /usr/local/bin/python3.13 for every venv.
 #
 # Components (default ports from each component's .env):
-#   MCP single server (mqacemcpserver-single/single_server.py, SSE)
-#   chat backend      (backend/app.py, FastAPI :8001)
+#   MCP single server (mqacemcpserver-single/single_server.py, SSE/TLS :8001)
+#   chat backend      (backend/app.py, FastAPI :8002)
 #   Streamlit UI      (frontend/app.py, :8003)
-#   log dashboard     (dashboard/dashboard_server.py, :8002)
+#   log dashboard     (dashboard/dashboard_server.py, :8004)
 #
 # Secrets/config live in per-component .env files, seeded here from .env.example
 # and NEVER clobbered (so values survive git pulls / re-deploys). For full
@@ -39,9 +39,22 @@
     aws_region: "us-east-1"
     openai_ssm_param: "/rhel-mq-platform/openai-api-key"
     backend_env: "/opt/apps/mqaceserver/mqacemcp/backend/.env"
-    # The single MCP server binds :8010 (mqacemcpserver-single/.env), so the
-    # backend must point its SSE client there.
-    mcp_sse_url: "http://localhost:8010/sse"
+    mcp_env: "/opt/apps/mqaceserver/mqacemcp/mqacemcpserver-single/.env"
+    # The single MCP server binds :8001 over TLS (mqacemcpserver-single/.env
+    # MCP_PORT), so the backend must point its SSE client at HTTPS on that port.
+    # (backend/.env.example still ships the stale :8443 — pinned below.)
+    mcp_port: 8001
+    mcp_sse_url: "https://localhost:8001/sse"
+    # backend/.env.example ships MCP_TLS_CA_BUNDLE=../certs/cert.pem, but
+    # mcp_client.py resolves it relative to the repo root (one dir too high),
+    # so it must be pinned to an absolute path or tool-loading fails (tools=0).
+    backend_ca_bundle: "{{ mqacemcp_dir }}/certs/cert.pem"
+    # Dashboard port. dashboard_server.py reads MCP_DASHBOARD_PORT from the
+    # process ENVIRONMENT only (no load_dotenv), and start-all.sh's start_service
+    # never sources per-component .env files — so a dashboard/.env alone is
+    # ignored and it defaults to :8002, colliding with the backend. The value is
+    # injected via the systemd unit's Environment= below, which children inherit.
+    dashboard_port: 8004
 
   handlers:
     - name: restart mqacemcp
@@ -88,6 +101,7 @@
         - "."
         - "backend"
         - "frontend"
+        - "dashboard"
         - "mqacemcpserver-single"
 
     - name: Look up the OpenAI API key from SSM Parameter Store (optional)
@@ -116,6 +130,20 @@
         path: "{{ backend_env }}"
         regexp: '^MCP_SSE_URL='
         line: "MCP_SSE_URL={{ mcp_sse_url }}"
+      notify: restart mqacemcp
+
+    - name: Pin backend MCP_TLS_CA_BUNDLE to an absolute path (relative ../certs resolves too high)
+      ansible.builtin.lineinfile:
+        path: "{{ backend_env }}"
+        regexp: '^MCP_TLS_CA_BUNDLE='
+        line: "MCP_TLS_CA_BUNDLE={{ backend_ca_bundle }}"
+      notify: restart mqacemcp
+
+    - name: Pin the MCP server port (mqacemcpserver-single/.env) so it matches MCP_SSE_URL
+      ansible.builtin.lineinfile:
+        path: "{{ mcp_env }}"
+        regexp: '^MCP_PORT='
+        line: "MCP_PORT={{ mcp_port }}"
       notify: restart mqacemcp
 
     - name: Copy the latest config-dump CSVs into the app's resources dir (replace existing)
@@ -170,6 +198,10 @@
           RemainAfterExit=yes
           WorkingDirectory={{ mqacemcp_dir }}
           Environment=PYTHON_BIN={{ py313 }}
+          # dashboard_server.py reads this only from the process env (no
+          # load_dotenv), so set it here or it defaults to :8002 and collides
+          # with the chat backend.
+          Environment=MCP_DASHBOARD_PORT={{ dashboard_port }}
           ExecStart=/bin/bash scripts/start-all.sh
           ExecStop=/bin/bash scripts/stop-all.sh
           TimeoutStartSec=0
@@ -190,4 +222,5 @@
         msg:
           - "mqacemcp stack at {{ mqacemcp_dir }} (per-component Python 3.13 venvs; Ansible's 3.9 untouched)"
           - "managed by systemd: mqacemcp.service  (ExecStart=start-all.sh, ExecStop=stop-all.sh)"
-          - "For full function: set OPENAI_API_KEY in backend/.env and align MCP_SSE_URL with the MCP server port, then: systemctl restart mqacemcp"
+          - "Ports pinned: MCP {{ mcp_port }} (https) · backend 8002 · UI 8003 · dashboard {{ dashboard_port }}"
+          - "For full function set OPENAI_API_KEY: aws ssm put-parameter --name {{ openai_ssm_param }} --type SecureString --value sk-... --region {{ aws_region }}, then: systemctl restart mqacemcp"

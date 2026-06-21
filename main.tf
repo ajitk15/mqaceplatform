@@ -213,6 +213,19 @@ resource "aws_security_group_rule" "mq_allow_ansible_ssh" {
   description              = "Allow Ansible control node SSH"
 }
 
+# Allow the control node (Ansible + MCP server) to reach the MQ REST/Console API
+# (9443). The MCP tools query queue managers over https://<qm-host>:9443/ibmmq/rest;
+# the base mq_ingress_rules only open 9443 to the operator CIDR, not in-VPC.
+resource "aws_security_group_rule" "mq_allow_ansible_rest" {
+  type                     = "ingress"
+  security_group_id        = module.sg_mq.sg_id
+  from_port                = 9443
+  to_port                  = 9443
+  protocol                 = "tcp"
+  source_security_group_id = module.sg_ansible.sg_id
+  description              = "Allow Ansible/MCP control node to reach MQ REST/Console"
+}
+
 module "sg_ace" {
   source        = "./modules/security_groups"
   name          = "${var.platform_name}-sg-ace"
@@ -220,6 +233,19 @@ module "sg_ace" {
   vpc_id        = aws_vpc.platform.id
   common_tags   = local.common_tags
   ingress_rules = local.ace_ingress_rules
+}
+
+# Allow the control node (Ansible + MCP server) to reach the ACE admin REST API
+# (4414, the node port in node_config.csv). ace_node_overview / ace_server_explore
+# call it; ace_ingress_rules only open 4414 to the operator CIDR, not in-VPC.
+resource "aws_security_group_rule" "ace_allow_ansible_admin" {
+  type                     = "ingress"
+  security_group_id        = module.sg_ace.sg_id
+  from_port                = 4414
+  to_port                  = 4414
+  protocol                 = "tcp"
+  source_security_group_id = module.sg_ansible.sg_id
+  description              = "Allow Ansible/MCP control node to reach ACE admin REST"
 }
 
 module "sg_ansible" {

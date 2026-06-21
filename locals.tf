@@ -26,13 +26,13 @@ locals {
   #       aws_security_group_rule (source_security_group_id) in main.tf (Fix #3).
   # ---------------------------------------------------------------------------
   mq_ingress_rules = [
-    { from_port = 22,   to_port = 22,   protocol = "tcp", cidr = var.allowed_cidr_blocks, description = "SSH from operator" },
-    { from_port = 1414, to_port = 1421, protocol = "tcp", cidr = ["10.0.0.0/16"],          description = "MQ Listeners (cluster QMs 1414-1419 + ACE node QMs 1420-1421)" },
-    { from_port = 9443, to_port = 9443, protocol = "tcp", cidr = var.allowed_cidr_blocks,   description = "MQ Web Console HTTPS" },
-    { from_port = 9080, to_port = 9080, protocol = "tcp", cidr = var.allowed_cidr_blocks,   description = "MQ Web Console HTTP" },
-    { from_port = 1883, to_port = 1883, protocol = "tcp", cidr = ["10.0.0.0/16"],           description = "MQTT" },
-    { from_port = 8883, to_port = 8883, protocol = "tcp", cidr = ["10.0.0.0/16"],           description = "MQTT over TLS" },
-    { from_port = 9157, to_port = 9157, protocol = "tcp", cidr = ["10.0.0.0/16"],           description = "MQ Prometheus Metrics" },
+    { from_port = 22, to_port = 22, protocol = "tcp", cidr = var.allowed_cidr_blocks, description = "SSH from operator" },
+    { from_port = 1414, to_port = 1421, protocol = "tcp", cidr = ["10.0.0.0/16"], description = "MQ Listeners (cluster QMs 1414-1419 + ACE node QMs 1420-1421)" },
+    { from_port = 9443, to_port = 9443, protocol = "tcp", cidr = var.allowed_cidr_blocks, description = "MQ Web Console HTTPS" },
+    { from_port = 9080, to_port = 9080, protocol = "tcp", cidr = var.allowed_cidr_blocks, description = "MQ Web Console HTTP" },
+    { from_port = 1883, to_port = 1883, protocol = "tcp", cidr = ["10.0.0.0/16"], description = "MQTT" },
+    { from_port = 8883, to_port = 8883, protocol = "tcp", cidr = ["10.0.0.0/16"], description = "MQTT over TLS" },
+    { from_port = 9157, to_port = 9157, protocol = "tcp", cidr = ["10.0.0.0/16"], description = "MQ Prometheus Metrics" },
   ]
 
   # ---------------------------------------------------------------------------
@@ -44,19 +44,24 @@ locals {
   # 9483  – ACE Web UI HTTPS
   # ---------------------------------------------------------------------------
   ace_ingress_rules = [
-    { from_port = 7600, to_port = 7600, protocol = "tcp", cidr = ["10.0.0.0/16"],         description = "ACE Integration Node" },
-    { from_port = 7800, to_port = 7800, protocol = "tcp", cidr = ["10.0.0.0/16"],         description = "ACE HTTP" },
-    { from_port = 7843, to_port = 7843, protocol = "tcp", cidr = ["10.0.0.0/16"],         description = "ACE HTTPS" },
+    { from_port = 7600, to_port = 7600, protocol = "tcp", cidr = ["10.0.0.0/16"], description = "ACE Integration Node" },
+    { from_port = 7800, to_port = 7800, protocol = "tcp", cidr = ["10.0.0.0/16"], description = "ACE HTTP" },
+    { from_port = 7843, to_port = 7843, protocol = "tcp", cidr = ["10.0.0.0/16"], description = "ACE HTTPS" },
     { from_port = 4414, to_port = 4414, protocol = "tcp", cidr = var.allowed_cidr_blocks, description = "ACE Admin" },
     { from_port = 9483, to_port = 9483, protocol = "tcp", cidr = var.allowed_cidr_blocks, description = "ACE Web UI HTTPS" },
   ]
 
   # ---------------------------------------------------------------------------
   # Ansible control node ports
+  # 8090       – MQ/ACE status (validate) dashboard, served by validate-dashboard.service
+  # 8000-8010  – MQ+ACE MCP stack (mqacemcp.service). Actual bindings within range:
+  #              8001 MCP server (SSE over TLS), 8002 chat backend (FastAPI),
+  #              8003 Streamlit UI, 8004 log dashboard. Range keeps headroom and
+  #              matches the firewalld rule opened in setup_mqacemcp.yml.
   # ---------------------------------------------------------------------------
   ansible_ingress_rules = [
-    { from_port = 22,   to_port = 22,   protocol = "tcp", cidr = var.allowed_cidr_blocks, description = "SSH from operator" },
+    { from_port = 22, to_port = 22, protocol = "tcp", cidr = var.allowed_cidr_blocks, description = "SSH from operator" },
     { from_port = 8090, to_port = 8090, protocol = "tcp", cidr = var.allowed_cidr_blocks, description = "MQ/ACE status dashboard" },
-    { from_port = 8000, to_port = 8010, protocol = "tcp", cidr = var.allowed_cidr_blocks, description = "MQ+ACE MCP stack (MCP server, chat backend, Streamlit UI, dashboard)" },
+    { from_port = 8000, to_port = 8010, protocol = "tcp", cidr = var.allowed_cidr_blocks, description = "MQ+ACE MCP stack (8001 MCP/SSE, 8002 backend, 8003 UI, 8004 dashboard)" },
   ]
 }
