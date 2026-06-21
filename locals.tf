@@ -57,5 +57,6 @@ locals {
   ansible_ingress_rules = [
     { from_port = 22,   to_port = 22,   protocol = "tcp", cidr = var.allowed_cidr_blocks, description = "SSH from operator" },
     { from_port = 8090, to_port = 8090, protocol = "tcp", cidr = var.allowed_cidr_blocks, description = "MQ/ACE status dashboard" },
+    { from_port = 8000, to_port = 8010, protocol = "tcp", cidr = var.allowed_cidr_blocks, description = "MQ+ACE MCP stack (MCP server, chat backend, Streamlit UI, dashboard)" },
   ]
 }

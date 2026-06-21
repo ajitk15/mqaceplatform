@@ -1,0 +1,193 @@
+---
+###############################################################################
+# setup_mqacemcp.yml — deploy the MQ+ACE MCP stack on the Ansible control node.
+#
+# Clones https://github.com/ajitk15/mqacemcp.git into /opt/apps/mqaceserver/mqacemcp,
+# builds an ISOLATED Python 3.13 venv per component (root .venv for the MCP server
+# + backend/frontend/dashboard .venv) via the repo's own scripts/start-all.sh
+# --setup, and runs the whole stack under a systemd service (start-all.sh /
+# stop-all.sh).
+#
+# It NEVER touches the system Python 3.9 that Ansible uses (/usr/bin/python3):
+# PYTHON_BIN is pinned to /usr/local/bin/python3.13 for every venv.
+#
+# Components (default ports from each component's .env):
+#   MCP single server (mqacemcpserver-single/single_server.py, SSE)
+#   chat backend      (backend/app.py, FastAPI :8001)
+#   Streamlit UI      (frontend/app.py, :8003)
+#   log dashboard     (dashboard/dashboard_server.py, :8002)
+#
+# Secrets/config live in per-component .env files, seeded here from .env.example
+# and NEVER clobbered (so values survive git pulls / re-deploys). For full
+# function set OPENAI_API_KEY in backend/.env and MQ/ACE REST creds in .env.
+###############################################################################
+
+- name: Deploy the MQ+ACE MCP stack (isolated Python 3.13) on the control node
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: false
+  vars:
+    mqacemcp_repo: "https://github.com/ajitk15/mqacemcp.git"
+    mqacemcp_dir: "/opt/apps/mqaceserver/mqacemcp"
+    # Source-built Python 3.13 — NOT the Ansible system interpreter (3.9).
+    py313: "/usr/local/bin/python3.13"
+    # Secret config pulled from SSM Parameter Store at deploy time (never in git
+    # or Terraform state). Set it once with:
+    #   aws ssm put-parameter --name /rhel-mq-platform/openai-api-key \
+    #       --type SecureString --value "sk-..." --region us-east-1
+    aws_region: "us-east-1"
+    openai_ssm_param: "/rhel-mq-platform/openai-api-key"
+    backend_env: "/opt/apps/mqaceserver/mqacemcp/backend/.env"
+    # The single MCP server binds :8010 (mqacemcpserver-single/.env), so the
+    # backend must point its SSE client there.
+    mcp_sse_url: "http://localhost:8010/sse"
+
+  handlers:
+    - name: restart mqacemcp
+      ansible.builtin.systemd:
+        name: mqacemcp.service
+        state: restarted
+
+  tasks:
+    - name: Ensure git is installed
+      ansible.builtin.package:
+        name: git
+        state: present
+
+    - name: Confirm Python 3.13 is present (Ansible keeps its own 3.9)
+      ansible.builtin.stat:
+        path: "{{ py313 }}"
+      register: py313_bin
+
+    - name: Fail if Python 3.13 is missing
+      ansible.builtin.assert:
+        that: py313_bin.stat.exists
+        fail_msg: "{{ py313 }} not found — the control-node bootstrap builds it; the app needs 3.13."
+
+    - name: Clone / update the mqacemcp repository (public)
+      ansible.builtin.git:
+        repo: "{{ mqacemcp_repo }}"
+        dest: "{{ mqacemcp_dir }}"
+        update: true
+        # force=true: the CSV-copy step below overwrites tracked files under
+        # resources/, leaving the tree dirty; reset them on pull (untracked
+        # .env files and venvs are preserved) so git pull never blocks.
+        force: true
+      environment:
+        GIT_TERMINAL_PROMPT: "0"
+
+    - name: Seed per-component .env files from .env.example (never clobber)
+      ansible.builtin.copy:
+        src: "{{ mqacemcp_dir }}/{{ item }}/.env.example"
+        dest: "{{ mqacemcp_dir }}/{{ item }}/.env"
+        remote_src: true
+        force: false
+        mode: "0600"
+      loop:
+        - "."
+        - "backend"
+        - "frontend"
+        - "mqacemcpserver-single"
+
+    - name: Look up the OpenAI API key from SSM Parameter Store (optional)
+      ansible.builtin.command: >-
+        aws ssm get-parameter --name {{ openai_ssm_param }} --with-decryption
+        --query Parameter.Value --output text --region {{ aws_region }}
+      register: openai_key
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Inject OPENAI_API_KEY into backend/.env (only when the SSM param exists)
+      ansible.builtin.lineinfile:
+        path: "{{ backend_env }}"
+        regexp: '^OPENAI_API_KEY='
+        line: "OPENAI_API_KEY={{ openai_key.stdout | trim }}"
+      when:
+        - openai_key.rc == 0
+        - (openai_key.stdout | trim | length) > 0
+        - "'None' not in openai_key.stdout"
+      no_log: true
+      notify: restart mqacemcp
+
+    - name: Align backend MCP_SSE_URL with the running MCP server port
+      ansible.builtin.lineinfile:
+        path: "{{ backend_env }}"
+        regexp: '^MCP_SSE_URL='
+        line: "MCP_SSE_URL={{ mcp_sse_url }}"
+      notify: restart mqacemcp
+
+    - name: Copy the latest config-dump CSVs into the app's resources dir (replace existing)
+      # The MCP server reads its manifests from mqacemcp/resources/ (the single
+      # server defaults RESOURCES_DIR to ../resources/). The 30-min dump cron
+      # writes them to /opt/apps/mqaceserver/resources/, so seed the app copy here.
+      ansible.builtin.shell: |
+        src=/opt/apps/mqaceserver/resources
+        dst={{ mqacemcp_dir }}/resources
+        mkdir -p "$dst"
+        copied=0
+        for f in qmgr_dump.csv node_dump.csv node_config.csv; do
+          [ -f "$src/$f" ] && install -m 0644 "$src/$f" "$dst/$f" && copied=$((copied+1))
+        done
+        echo "copied $copied csv(s) from $src to $dst"
+      register: mqacemcp_csv
+      changed_when: "'copied 0 ' not in mqacemcp_csv.stdout"
+
+    - name: Build the per-component Python 3.13 venvs + install requirements
+      # start-all.sh --setup creates each venv (from PYTHON_BIN) and pip installs
+      # that component's requirements.txt; --check-only stops before launching so
+      # the systemd service owns the running processes. Re-runs are cache-fast and
+      # keep deps in sync after a git pull.
+      ansible.builtin.command:
+        cmd: "bash scripts/start-all.sh --setup --check-only"
+        chdir: "{{ mqacemcp_dir }}"
+      environment:
+        PYTHON_BIN: "{{ py313 }}"
+      register: mqacemcp_setup
+      changed_when: "'dependencies installed' in mqacemcp_setup.stdout"
+
+    - name: Open the MCP stack ports in firewalld (control node)
+      ansible.builtin.shell: |
+        systemctl enable --now firewalld
+        firewall-cmd --permanent --add-port=8000-8010/tcp
+        firewall-cmd --reload
+      register: mqacemcp_fw
+      changed_when: "'ALREADY_ENABLED' not in mqacemcp_fw.stderr"
+
+    - name: Install the mqacemcp systemd service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/mqacemcp.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=MQ+ACE MCP stack (MCP server + chat backend + Streamlit UI + dashboard)
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          WorkingDirectory={{ mqacemcp_dir }}
+          Environment=PYTHON_BIN={{ py313 }}
+          ExecStart=/bin/bash scripts/start-all.sh
+          ExecStop=/bin/bash scripts/stop-all.sh
+          TimeoutStartSec=0
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: restart mqacemcp
+
+    - name: Enable + start the mqacemcp stack
+      ansible.builtin.systemd:
+        name: mqacemcp.service
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Report
+      ansible.builtin.debug:
+        msg:
+          - "mqacemcp stack at {{ mqacemcp_dir }} (per-component Python 3.13 venvs; Ansible's 3.9 untouched)"
+          - "managed by systemd: mqacemcp.service  (ExecStart=start-all.sh, ExecStop=stop-all.sh)"
+          - "For full function: set OPENAI_API_KEY in backend/.env and align MCP_SSE_URL with the MCP server port, then: systemctl restart mqacemcp"

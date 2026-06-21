@@ -99,9 +99,15 @@ resource "aws_iam_role_policy" "ansible_secrets" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect   = "Allow"
-        Action   = ["ssm:GetParameter"]
-        Resource = aws_ssm_parameter.platform_key.arn
+        Effect = "Allow"
+        Action = ["ssm:GetParameter"]
+        Resource = [
+          aws_ssm_parameter.platform_key.arn,
+          # Other platform secrets (e.g. /<platform>/openai-api-key) the control
+          # node injects into app config at deploy time. Secrets live in SSM,
+          # never in git or Terraform state.
+          "arn:aws:ssm:${var.aws_region}:*:parameter/${var.platform_name}/*",
+        ]
       },
       {
         # Decrypt the SecureString — scoped to calls made via SSM only.

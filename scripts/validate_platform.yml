@@ -168,6 +168,33 @@
       ansible.builtin.set_fact:
         ctl_csv_files: "{{ ctl_csvs.stdout_lines | default([]) }}"
 
+    - name: Probe the MQ+ACE MCP stack endpoints (health checks, localhost)
+      ansible.builtin.shell: |
+        repo=/opt/apps/mqaceserver/mqacemcp
+        geten() { f="$1"; k="$2"; d="$3"; v=""; [ -f "$f" ] && v=$(grep -E "^[[:space:]]*$k[[:space:]]*=" "$f" | head -1 | sed -E "s/^[[:space:]]*$k[[:space:]]*=[[:space:]]*//" | tr -d "\r"); [ -n "$v" ] && echo "$v" || echo "$d"; }
+        if [ -n "$(geten $repo/.env MCP_TLS_CERT '')" ]; then sch=https; else sch=http; fi
+        mcp_port=$(geten $repo/mqacemcpserver-single/.env MCP_PORT 8010)
+        bk_port=$(geten $repo/backend/.env CHAT_PORT 8001)
+        dash_port=$(geten $repo/.env MCP_DASHBOARD_PORT 8002)
+        fe_port=8003
+        emit() {  # name|scheme|port|display_path  (probes health_path)
+          name="$1"; s="$2"; port="$3"; hpath="$4"; dpath="$5"
+          code=$(curl -sk -o /dev/null -m 4 -w "%{http_code}" "$s://localhost:$port$hpath" 2>/dev/null)
+          [ "$code" = "200" ] && st=UP || st=DOWN
+          echo "$name|$s|$port|$dpath|$st|$code"
+        }
+        emit "MCP server (SSE)"   "$sch" "$mcp_port"  "/healthz"        "/sse"
+        emit "Chat backend (API)" "http" "$bk_port"   "/api/health"     "/api/health"
+        emit "Streamlit chat UI"  "http" "$fe_port"   "/_stcore/health" "/"
+        emit "Log dashboard"      "$sch" "$dash_port" "/healthz"        "/dashboard"
+      register: mcp_eps
+      changed_when: false
+      failed_when: false
+
+    - name: Record MCP stack endpoint statuses
+      ansible.builtin.set_fact:
+        mqacemcp_endpoints: "{{ mcp_eps.stdout_lines | default([]) }}"
+
     - name: Render the status dashboard
       ansible.builtin.template:
         src: validate_dashboard.html.j2

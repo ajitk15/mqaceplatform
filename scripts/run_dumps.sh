@@ -47,6 +47,17 @@ run_pb extract_node_dump.yml \
   -e "node_dump_output=$RESOURCES_DIR/node_dump.csv" \
   -e "node_config_output=$RESOURCES_DIR/node_config.csv"
 
+# Keep the MQ+ACE MCP app's manifests current: copy the freshly generated CSVs
+# into its resources/ dir (the MCP server reads them from there) — replace any
+# existing copy. No-op if the app isn't deployed.
+APP_RES="/opt/apps/mqaceserver/mqacemcp/resources"
+if [ -d "$APP_RES" ]; then
+  for f in qmgr_dump.csv node_dump.csv node_config.csv; do
+    [ -f "$RESOURCES_DIR/$f" ] && install -m 0644 "$RESOURCES_DIR/$f" "$APP_RES/$f"
+  done
+  log "synced manifests to $APP_RES"
+fi
+
 # Retain ~1 week of hourly logs.
 ls -1t "$LOG_DIR"/run-*.log 2>/dev/null | tail -n +169 | xargs -r rm -f
 

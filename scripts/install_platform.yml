@@ -15,4 +15,5 @@
 - import_playbook: configure_mq.yml         # create dev QM (QM1) + start MQ Console
 - import_playbook: install_ace.yml          # install ACE on the MQ+ACE servers
 - import_playbook: schedule_dumps.yml       # control node: every-30-min qmgr/node config dumps cron (before optional demo BARs so it always installs)
+- import_playbook: setup_mqacemcp.yml       # control node: clone MQ+ACE MCP stack, build per-component Python 3.13 venvs, run via systemd (does not touch Ansible's 3.9)
 - import_playbook: setup_ace_components.yml # create integration servers + deploy demo BARs (best-effort; may time out on t3.micro)
