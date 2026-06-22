@@ -55,6 +55,14 @@
     # ignored and it defaults to :8002, colliding with the backend. The value is
     # injected via the systemd unit's Environment= below, which children inherit.
     dashboard_port: 8004
+    # Hostname allow-list for the MQ/ACE REST calls. The MCP resolves each
+    # queue-manager/node to its host via the CSV manifests (dmpmqcfg uses the
+    # EC2 internal name, e.g. ip-10-0-1-9.ec2.internal), then checks the host
+    # against this prefix list. .env.example ships it EMPTY, which means
+    # is_hostname_allowed() rejects every host (<none>) — so all live tools fail
+    # even when the QM is in the manifest. Pin it to the VPC's internal prefix
+    # (vpc_cidr 10.0.0.0/16 → ip-10-) so in-VPC MQ/ACE hosts are reachable.
+    allowed_hostname_prefixes: "ip-10-"
 
   handlers:
     - name: restart mqacemcp
@@ -144,6 +152,16 @@
         path: "{{ mcp_env }}"
         regexp: '^MCP_PORT='
         line: "MCP_PORT={{ mcp_port }}"
+      notify: restart mqacemcp
+
+    - name: Set the MQ/ACE hostname allow-list (.env.example ships it empty = block all)
+      ansible.builtin.lineinfile:
+        path: "{{ mcp_env }}"
+        regexp: "^{{ item }}="
+        line: "{{ item }}={{ allowed_hostname_prefixes }}"
+      loop:
+        - MQ_ALLOWED_HOSTNAME_PREFIXES
+        - ACE_ALLOWED_HOSTNAME_PREFIXES
       notify: restart mqacemcp
 
     - name: Copy the latest config-dump CSVs into the app's resources dir (replace existing)

@@ -17,9 +17,10 @@
 │  ┌────────────────────────────────────────┐                         │
 │  │         Ansible Control Node           │                         │
 │  │  Ansible · Status dashboard (:8090)    │                         │
+│  │  MQ+ACE MCP stack (:8001-:8004)        │                         │
 │  └────────────────────────────────────────┘                         │
 │                                                                     │
-│  SSH key stored in AWS Secrets Manager (not in user_data)           │
+│  SSH key stored in AWS SSM Parameter Store (not in user_data)       │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -64,10 +65,10 @@ Everything is tagged `ManagedBy = Terraform`. Nothing is left behind.
 
 | Fix | What changed |
 |-----|-------------|
-| #1 | SSH private key is stored in AWS Secrets Manager; fetched at runtime by the Ansible node via IAM role — never appears in user_data or the AWS console |
+| #1 | SSH private key is stored in AWS SSM Parameter Store (SecureString, encrypted with the default `aws/ssm` KMS key — no cost); fetched at runtime by the Ansible node via IAM role — never appears in user_data or the AWS console |
 | #2 | IAM role + instance profile replaces embedding secrets in state |
 | #3 | MQ server SGs now have an explicit `source_security_group_id` rule allowing SSH from the Ansible control node SG |
-| #4 | PEM key is written via `aws secretsmanager get-secret-value` directly to disk — no heredoc quoting issue |
+| #4 | PEM key is written via `aws ssm get-parameter --with-decryption` directly to disk — no heredoc quoting issue |
 | #5 | `systemctl enable --now firewalld` runs before every `firewall-cmd` call |
 | #6 | Python version symlinks are derived from `var.python_version` — bumping the var just works |
 | #7 | Remote S3 backend template included (commented out) — uncomment and fill in before production use |
@@ -84,7 +85,7 @@ Everything is tagged `ManagedBy = Terraform`. Nothing is left behind.
 ### IBM MQ (Servers 1, 2, 3, 4)
 | Port | Purpose |
 |------|---------|
-| 1414–1415 | MQ Listener |
+| 1414–1421 | MQ Listeners — cluster QMs (1414 MQREPO1, 1415 QM1, 1416 MQREPO2) + ACE node QMs (1420 MQNODE1, 1421 MQNODE2); open in-VPC only |
 | 9443 | MQ Web Console HTTPS |
 | 9080 | MQ Web Console HTTP |
 | 1883 | MQTT |
@@ -104,14 +105,48 @@ Everything is tagged `ManagedBy = Terraform`. Nothing is left behind.
 | Port | Purpose |
 |------|---------|
 | 22 | SSH |
-| 8090 | MQ/ACE status dashboard |
+| 8090 | MQ/ACE status (validate) dashboard |
+| 8000–8010 | MQ+ACE MCP stack (8001 MCP server SSE/TLS · 8002 chat backend · 8003 Streamlit UI · 8004 log dashboard) |
 
 ---
 
 ## IBM MQ & ACE installation
 
-The EC2 bootstrap only prepares prerequisites and opens ports — it does **not**
-install MQ/ACE. Use the Ansible playbooks under `scripts/` to install them.
+**The install runs automatically as part of `terraform apply`.** After the control
+node comes up, Terraform's `deploy_playbooks` resource copies `scripts/` to
+`/etc/ansible/playbooks/` and launches `run_platform_install.sh` as a detached
+`platform-install` systemd unit. That driver waits for cloud-init to finish on
+every node, then runs `install_platform.yml` end-to-end. `apply` returns
+immediately — the long install continues in the background and the `:8090`
+dashboard tracks progress (red → green) as nodes come online.
+
+```bash
+# Watch the install from the control node:
+ssh -i rhel-mq-platform-key.pem ec2-user@$(terraform output -raw ansible_control_public_ip)
+sudo journalctl -u platform-install -f      # or: tail -f /var/log/platform-install.log
+```
+
+`install_platform.yml` orchestrates, in order:
+
+| Playbook | Does |
+|----------|------|
+| `install_mq.yml` | Install IBM MQ on all MQ servers (mirrors the manual RPM install) |
+| `setup_mq_components.yml` | Create per-server queue managers + `ACECLUSTER` from `scripts/mqsetup/*.mqsc` |
+| `configure_mq.yml` | Create the dev QM (`QM1`) + dev MQSC objects + start the MQ Console (mqweb) |
+| `install_ace.yml` | Install IBM ACE on the MQ+ACE servers (Server 2 & 3) |
+| `schedule_dumps.yml` | Control node: every-30-min queue-manager / node config dump cron |
+| `setup_mqacemcp.yml` | Control node: clone the MQ+ACE MCP stack, build per-component Python 3.13 venvs, run under systemd |
+| `setup_ace_components.yml` | Create integration servers + deploy demo BARs (best-effort) |
+
+The EC2 bootstrap (cloud-init) only prepares prerequisites and opens ports — all
+MQ/ACE install work happens in the playbooks above. To re-run or run a single
+stage manually:
+
+```bash
+cd /etc/ansible/playbooks
+ansible-playbook install_platform.yml     # full install
+ansible-playbook verify_mq_ace.yml        # verify end-to-end
+```
 
 ### Binaries — use the free Developer editions
 
@@ -141,26 +176,19 @@ mq_ace_s3_bucket = "my-mq-ace-binaries"
 terraform apply
 ```
 
-### Run the install playbooks
+### Install variables
 
-```bash
-# On the Ansible control node (playbooks live in scripts/, copy them across or git clone):
-#   scripts/mq_ace_install_vars.yml   <- edit: queue manager name, ports, dev password, ACE bits
-#   scripts/install_mq.yml            <- install IBM MQ  -> all_mq_servers (mirrors the manual RPM install)
-#   scripts/configure_mq.yml          <- queue manager + dev objects + MQ Console (mqweb)
-#   scripts/install_ace.yml           <- install IBM ACE -> mq_ace servers
-#   scripts/install_platform.yml      <- runs all three in order
-
-ansible-playbook install_platform.yml
-
-# Then verify the install end-to-end:
-ansible-playbook verify_mq_ace.yml
-```
+`scripts/mq_ace_install_vars.yml` holds the install settings — queue-manager
+name, ports, dev password, and ACE bits. Terraform copies it to
+`/etc/ansible/playbooks/` with the rest of `scripts/`; edit it there (and re-run
+`install_platform.yml`) to change defaults. Instance sizing is set in
+`terraform.tfvars` / `variables.tf` (`instance_type_mq` = `t3.large`,
+`instance_type_mq_ace` = `t3.xlarge`, `instance_type_ansible` = `t3.medium`).
 
 `install_mq.yml` downloads the free developer edition straight from IBM's public
 mirror (`public.dhe.ibm.com`, no IBMid) and installs the same RPM set as a manual
-install, then `setmqinst -i`. It also creates a swapfile, since `t3.micro` (1 GB
-RAM) is below MQ minimums — fine for dev/eval only.
+install, then `setmqinst -i`. It also creates a swapfile to keep small instance
+types comfortably above MQ minimums — fine for dev/eval only.
 
 `configure_mq.yml` then creates the queue manager (`crtmqm`/`strmqm` + a
 `mq-<qm>.service` unit), applies the developer MQSC objects (listener, `DEV.QUEUE.1`,
