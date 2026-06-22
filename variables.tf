@@ -84,6 +84,16 @@ variable "environment" {
   default     = "dev"
 }
 
+# Email address that receives an SNS notification (with the :8090 dashboard URL)
+# each time the platform install finishes successfully. SNS email notifications
+# are free for the first 1,000/month — no SMTP/password required. The address
+# must confirm a one-time subscription link AWS emails on first apply.
+variable "notify_email" {
+  description = "Email address to notify with the dashboard URL when infrastructure is ready (empty = disabled)"
+  type        = string
+  default     = ""
+}
+
 # Optional: private S3 bucket holding the IBM MQ/ACE developer binaries.
 # Leave empty to skip granting S3 access (default). Set it to enable the
 # Ansible control node to pull binaries from S3 (see scripts/install_platform.yml).

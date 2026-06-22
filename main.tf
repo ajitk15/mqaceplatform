@@ -67,7 +67,7 @@ resource "local_file" "private_key" {
 resource "aws_ssm_parameter" "platform_key" {
   name        = "/${var.platform_name}/ssh-private-key"
   description = "Platform SSH private key for Ansible control node"
-  type        = "SecureString"   # encrypted with the default aws/ssm KMS key (no cost)
+  type        = "SecureString" # encrypted with the default aws/ssm KMS key (no cost)
   value       = tls_private_key.platform.private_key_pem
 
   tags = local.common_tags
@@ -146,6 +146,40 @@ resource "aws_iam_role_policy" "ansible_s3_binaries" {
         Resource = "arn:aws:s3:::${var.mq_ace_s3_bucket}"
       }
     ]
+  })
+}
+
+###############################################################################
+# "Platform ready" email notification (SES) — free, no SMTP/password.
+# Verifies the notify address as an SES identity; the control node sends an
+# email (from/to that address) with the :8090 dashboard URL when the install
+# finishes successfully. Created only when var.notify_email is set.
+#
+# First apply in a fresh account: AWS emails a one-time verification link to the
+# address that must be clicked. In the SES sandbox both sender and recipient must
+# be verified — using the same address for both satisfies that with one click.
+###############################################################################
+resource "aws_ses_email_identity" "notify" {
+  count = var.notify_email != "" ? 1 : 0
+  email = var.notify_email
+}
+
+# Let the Ansible control node send the "ready" email from the verified identity.
+resource "aws_iam_role_policy" "ansible_ses_send" {
+  count = var.notify_email != "" ? 1 : 0
+  name  = "send-ready-notification"
+  role  = aws_iam_role.ansible_control.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["ses:SendEmail", "ses:SendRawEmail"]
+      Resource = aws_ses_email_identity.notify[0].arn
+      Condition = {
+        StringEquals = { "ses:FromAddress" = var.notify_email }
+      }
+    }]
   })
 }
 
@@ -269,7 +303,7 @@ module "server1" {
   key_name           = aws_key_pair.platform.key_name
   security_group_ids = [module.sg_mq.sg_id]
   common_tags        = merge(local.common_tags, { Role = "MQ" })
-  user_data          = templatefile("${path.module}/scripts/mq_setup.sh.tpl", {
+  user_data = templatefile("${path.module}/scripts/mq_setup.sh.tpl", {
     python_version = var.python_version
     ansible_pubkey = tls_private_key.platform.public_key_openssh
   })
@@ -287,7 +321,7 @@ module "server2" {
   key_name           = aws_key_pair.platform.key_name
   security_group_ids = [module.sg_mq.sg_id, module.sg_ace.sg_id]
   common_tags        = merge(local.common_tags, { Role = "MQ+ACE" })
-  user_data          = templatefile("${path.module}/scripts/mq_ace_setup.sh.tpl", {
+  user_data = templatefile("${path.module}/scripts/mq_ace_setup.sh.tpl", {
     python_version = var.python_version
     ansible_pubkey = tls_private_key.platform.public_key_openssh
   })
@@ -302,7 +336,7 @@ module "server3" {
   key_name           = aws_key_pair.platform.key_name
   security_group_ids = [module.sg_mq.sg_id, module.sg_ace.sg_id]
   common_tags        = merge(local.common_tags, { Role = "MQ+ACE" })
-  user_data          = templatefile("${path.module}/scripts/mq_ace_setup.sh.tpl", {
+  user_data = templatefile("${path.module}/scripts/mq_ace_setup.sh.tpl", {
     python_version = var.python_version
     ansible_pubkey = tls_private_key.platform.public_key_openssh
   })
@@ -313,22 +347,22 @@ module "server3" {
 # FIX #8 – explicit depends_on ensures private IPs are resolved before templating
 ###############################################################################
 module "ansible_control" {
-  source             = "./modules/ec2_instance"
-  name               = "${var.platform_name}-ansible-control"
-  ami_id             = data.aws_ami.rhel.id
-  instance_type      = var.instance_type_ansible
-  subnet_id          = aws_subnet.platform.id
-  key_name           = aws_key_pair.platform.key_name
-  security_group_ids = [module.sg_ansible.sg_id]
+  source               = "./modules/ec2_instance"
+  name                 = "${var.platform_name}-ansible-control"
+  ami_id               = data.aws_ami.rhel.id
+  instance_type        = var.instance_type_ansible
+  subnet_id            = aws_subnet.platform.id
+  key_name             = aws_key_pair.platform.key_name
+  security_group_ids   = [module.sg_ansible.sg_id]
   iam_instance_profile = aws_iam_instance_profile.ansible_control.name
-  common_tags        = merge(local.common_tags, { Role = "AnsibleControl" })
-  user_data          = templatefile("${path.module}/scripts/ansible_control_setup.sh.tpl", {
-    python_version     = var.python_version
-    param_name         = aws_ssm_parameter.platform_key.name
-    server1_ip         = module.server1.private_ip
-    server2_ip         = module.server2.private_ip
-    server3_ip         = module.server3.private_ip
-    ansible_user       = var.rhel_user
+  common_tags          = merge(local.common_tags, { Role = "AnsibleControl" })
+  user_data = templatefile("${path.module}/scripts/ansible_control_setup.sh.tpl", {
+    python_version = var.python_version
+    param_name     = aws_ssm_parameter.platform_key.name
+    server1_ip     = module.server1.private_ip
+    server2_ip     = module.server2.private_ip
+    server3_ip     = module.server3.private_ip
+    ansible_user   = var.rhel_user
   })
 
   depends_on = [
@@ -346,7 +380,7 @@ module "ansible_control" {
 ###############################################################################
 resource "local_file" "ansible_inventory" {
   filename = "${path.module}/inventory/hosts.ini"
-  content  = templatefile("${path.module}/inventory/hosts.ini.tpl", {
+  content = templatefile("${path.module}/inventory/hosts.ini.tpl", {
     server1_ip   = module.server1.public_ip
     server2_ip   = module.server2.public_ip
     server3_ip   = module.server3.public_ip
@@ -401,6 +435,10 @@ resource "terraform_data" "deploy_playbooks" {
       "sudo chown -R root:root /etc/ansible/playbooks",
       "sudo install -m 0755 /etc/ansible/playbooks/run_platform_install.sh /usr/local/bin/run_platform_install.sh",
       "sudo install -m 0755 /etc/ansible/playbooks/run_validate.sh /usr/local/bin/run_validate.sh",
+      # Drop the "platform ready" notification config (verified SES sender) so
+      # run_platform_install.sh can email the dashboard URL on success. Rewritten
+      # on every apply, so no instance replacement is needed to (re)configure it.
+      "printf 'NOTIFY_EMAIL=%s\\nDASHBOARD_PORT=8090\\nAWS_DEFAULT_REGION=${var.aws_region}\\n' '${var.notify_email}' | sudo tee /etc/platform-notify.conf >/dev/null",
       "echo 'Playbooks deployed to /etc/ansible/playbooks/'",
       # Detached transient unit: survives this SSH session; apply returns at once.
       "sudo systemctl stop platform-install.service 2>/dev/null || true",

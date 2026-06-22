@@ -58,3 +58,13 @@ output "ssh_key_parameter" {
   description = "Name of the SSM Parameter Store SecureString holding the platform SSH private key"
   value       = aws_ssm_parameter.platform_key.name
 }
+
+output "ready_notification_identity" {
+  description = "Verified SES identity used to email the dashboard URL when the platform install finishes (empty if notify_email unset)"
+  value       = var.notify_email != "" ? aws_ses_email_identity.notify[0].email : ""
+}
+
+output "dashboard_url" {
+  description = "MQ/ACE status dashboard (:8090) on the Ansible control node"
+  value       = "http://${module.ansible_control.public_ip}:8090"
+}
