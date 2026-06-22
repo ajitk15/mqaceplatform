@@ -1,0 +1,214 @@
+---
+###############################################################################
+# setup_gateway.yml — Caddy secure gateway on the Ansible control node.
+#
+# Exposes the platform's web services behind ONE HTTPS endpoint on :443 with
+# Basic Auth, so the otherwise auth-less :8090 dashboard isn't reachable raw.
+# Caddy reverse-proxies to the services over localhost, so only :443 needs to be
+# open (the individual ports stay restricted to the operator IP in the SG).
+#
+# TLS: self-signed cert (no domain) with the node's public IP as SAN — browsers
+# show a one-time "untrusted" warning. Auth: bcrypt hash from SSM SecureString
+# /<platform>/gateway-password-hash (set once, see fail_msg below).
+#
+# Add more services later as extra site blocks / listener ports in the Caddyfile
+# (e.g. :8443 -> https://localhost:9443 MQ Web Console).
+###############################################################################
+
+- name: Deploy the Caddy secure gateway on the control node
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: false
+  vars:
+    aws_region: "us-east-1"
+    gateway_username: "admin"
+    gateway_hash_ssm_param: "/rhel-mq-platform/gateway-password-hash"
+    caddy_bin: "/usr/local/bin/caddy"
+    caddy_dir: "/etc/caddy"
+    dashboard_upstream: "localhost:8090"
+    chatui_upstream: "localhost:8003"
+    logdash_upstream: "localhost:8004"
+
+  handlers:
+    - name: restart caddy
+      ansible.builtin.systemd:
+        name: caddy.service
+        state: restarted
+        daemon_reload: true
+
+  tasks:
+    - name: Ensure openssl is installed (for the self-signed cert)
+      ansible.builtin.package:
+        name: openssl
+        state: present
+
+    - name: Download the static Caddy binary
+      ansible.builtin.get_url:
+        url: "https://caddyserver.com/api/download?os=linux&arch=amd64"
+        dest: "{{ caddy_bin }}"
+        mode: "0755"
+        force: false
+      register: caddy_dl
+      notify: restart caddy
+
+    - name: Create Caddy config + TLS dirs
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0750"
+      loop:
+        - "{{ caddy_dir }}"
+        - "{{ caddy_dir }}/tls"
+
+    - name: Discover the node's public IP (IMDSv2 token, IMDSv1 fallback) for the cert SAN
+      ansible.builtin.shell: |
+        set -o pipefail
+        TOKEN=$(curl -s --max-time 3 -X PUT "http://169.254.169.254/latest/api/token" \
+                -H "X-aws-ec2-metadata-token-ttl-seconds: 60" || true)
+        curl -s --max-time 3 ${TOKEN:+-H "X-aws-ec2-metadata-token: $TOKEN"} \
+             http://169.254.169.254/latest/meta-data/public-ipv4
+      args:
+        executable: /bin/bash
+      register: public_ip
+      changed_when: false
+
+    - name: Require a public IP for the cert
+      ansible.builtin.assert:
+        that: (public_ip.stdout | trim | length) > 6
+        fail_msg: "Could not determine the node's public IP from IMDS (got '{{ public_ip.stdout | trim }}')."
+
+    - name: Generate a self-signed cert for the gateway (SAN = public IP)
+      ansible.builtin.command: >-
+        openssl req -x509 -newkey rsa:2048 -nodes
+        -keyout {{ caddy_dir }}/tls/key.pem -out {{ caddy_dir }}/tls/cert.pem
+        -days 3650 -subj "/CN={{ public_ip.stdout | trim }}"
+        -addext "subjectAltName=IP:{{ public_ip.stdout | trim }}"
+      args:
+        creates: "{{ caddy_dir }}/tls/cert.pem"
+      notify: restart caddy
+
+    - name: Look up the gateway password hash from SSM Parameter Store
+      ansible.builtin.command: >-
+        aws ssm get-parameter --name {{ gateway_hash_ssm_param }} --with-decryption
+        --query Parameter.Value --output text --region {{ aws_region }}
+      register: gw_hash
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Require the gateway password hash to be set in SSM
+      ansible.builtin.assert:
+        that:
+          - gw_hash.rc == 0
+          - (gw_hash.stdout | trim | length) > 0
+          - "'None' not in gw_hash.stdout"
+        fail_msg: >-
+          Gateway password hash missing. Set it once:
+          {{ caddy_bin }} hash-password --plaintext '<PASSWORD>'  then
+          aws ssm put-parameter --name {{ gateway_hash_ssm_param }} --type SecureString
+          --value '<the $2a$... hash>' --region {{ aws_region }}
+
+    - name: Write the gateway env file (user + bcrypt hash)
+      ansible.builtin.copy:
+        dest: "{{ caddy_dir }}/gateway.env"
+        mode: "0600"
+        content: |
+          GATEWAY_USER={{ gateway_username }}
+          GATEWAY_PASSWORD_HASH={{ gw_hash.stdout | trim }}
+      no_log: true
+      notify: restart caddy
+
+    - name: Write the Caddyfile
+      ansible.builtin.copy:
+        dest: "{{ caddy_dir }}/Caddyfile"
+        mode: "0644"
+        content: |
+          {
+              auto_https off
+              admin off
+          }
+
+          # Secure gateway — HTTPS (self-signed) + Basic Auth in front of the
+          # platform dashboard. Add more services below as extra site blocks on
+          # their own listener ports (open the matching SG port too), e.g.:
+          #   :8443 { tls ... basic_auth {...}
+          #           reverse_proxy https://localhost:9443 {
+          #               transport http { tls_insecure_skip_verify } } }
+          :443 {
+              tls {{ caddy_dir }}/tls/cert.pem {{ caddy_dir }}/tls/key.pem
+              basic_auth {
+                  {$GATEWAY_USER} {$GATEWAY_PASSWORD_HASH}
+              }
+              reverse_proxy {{ dashboard_upstream }}
+          }
+
+          # Streamlit chat UI. Caddy proxies the WebSocket (/_stcore/stream)
+          # automatically. Streamlit runs proxy-friendly (CORS/XSRF disabled via
+          # env in the mqacemcp systemd unit) since the gateway authenticates.
+          :8444 {
+              tls {{ caddy_dir }}/tls/cert.pem {{ caddy_dir }}/tls/key.pem
+              basic_auth {
+                  {$GATEWAY_USER} {$GATEWAY_PASSWORD_HASH}
+              }
+              reverse_proxy {{ chatui_upstream }}
+          }
+
+          # MQ+ACE MCP log dashboard (UI served at /dashboard on :8004).
+          :8445 {
+              tls {{ caddy_dir }}/tls/cert.pem {{ caddy_dir }}/tls/key.pem
+              basic_auth {
+                  {$GATEWAY_USER} {$GATEWAY_PASSWORD_HASH}
+              }
+              reverse_proxy {{ logdash_upstream }}
+          }
+      notify: restart caddy
+
+    - name: Install the caddy systemd service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/caddy.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Caddy secure gateway (HTTPS + Basic Auth) for the MQ/ACE platform
+          After=network-online.target validate-dashboard.service
+          Wants=network-online.target
+
+          [Service]
+          Type=notify
+          EnvironmentFile={{ caddy_dir }}/gateway.env
+          ExecStart={{ caddy_bin }} run --config {{ caddy_dir }}/Caddyfile --adapter caddyfile
+          ExecReload={{ caddy_bin }} reload --config {{ caddy_dir }}/Caddyfile --adapter caddyfile
+          Restart=always
+          RestartSec=5
+          LimitNOFILE=1048576
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: restart caddy
+
+    - name: Open the gateway ports (:443 dashboard, :8444 chat UI) in firewalld
+      ansible.builtin.shell: |
+        systemctl enable --now firewalld
+        firewall-cmd --permanent --add-port=443/tcp
+        firewall-cmd --permanent --add-port=8444/tcp
+        firewall-cmd --permanent --add-port=8445/tcp
+        firewall-cmd --reload
+      register: gw_fw
+      changed_when: "'ALREADY_ENABLED' not in gw_fw.stderr"
+
+    - name: Enable + start the caddy gateway
+      ansible.builtin.systemd:
+        name: caddy.service
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Report
+      ansible.builtin.debug:
+        msg:
+          - "Secure gateway live (Basic Auth user: {{ gateway_username }}, self-signed cert — accept the warning once):"
+          - "  Dashboard : https://{{ public_ip.stdout | trim }}        -> {{ dashboard_upstream }}"
+          - "  Chat UI   : https://{{ public_ip.stdout | trim }}:8444   -> {{ chatui_upstream }}"
+          - "  Log dash  : https://{{ public_ip.stdout | trim }}:8445/dashboard -> {{ logdash_upstream }}"
+          - "Backing ports (8090/8003/8004) stay operator-IP only; reached via localhost."

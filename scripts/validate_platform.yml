@@ -198,6 +198,25 @@
       ansible.builtin.set_fact:
         mqacemcp_endpoints: "{{ mcp_eps.stdout_lines | default([]) }}"
 
+    - name: Probe the secure gateway (Caddy) listeners
+      ansible.builtin.shell: |
+        emit() {  # name|port|path -> name|port|path|status|code  (Caddy returns 401 when UP = auth challenge)
+          name="$1"; port="$2"; path="$3"
+          code=$(curl -sk -o /dev/null -m 4 -w "%{http_code}" "https://localhost:$port$path" 2>/dev/null)
+          case "$code" in 200|401) st=UP;; *) st=DOWN;; esac
+          echo "$name|$port|$path|$st|$code"
+        }
+        emit "Dashboard (secure)"     443  "/"
+        emit "Chat UI (secure)"       8444 "/"
+        emit "Log dashboard (secure)" 8445 "/dashboard"
+      register: gw_eps
+      changed_when: false
+      failed_when: false
+
+    - name: Record secure-gateway endpoint statuses
+      ansible.builtin.set_fact:
+        gateway_endpoints: "{{ gw_eps.stdout_lines | default([]) }}"
+
     - name: Render the status dashboard
       ansible.builtin.template:
         src: validate_dashboard.html.j2

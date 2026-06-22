@@ -40,15 +40,22 @@
     openai_ssm_param: "/rhel-mq-platform/openai-api-key"
     backend_env: "/opt/apps/mqaceserver/mqacemcp/backend/.env"
     mcp_env: "/opt/apps/mqaceserver/mqacemcp/mqacemcpserver-single/.env"
-    # The single MCP server binds :8001 over TLS (mqacemcpserver-single/.env
-    # MCP_PORT), so the backend must point its SSE client at HTTPS on that port.
-    # (backend/.env.example still ships the stale :8443 — pinned below.)
+    # TLS for the MCP SSE endpoint (:8001). The single MCP server enables HTTPS
+    # only when BOTH MCP_TLS_CERT and MCP_TLS_KEY are set (mqacemcpserver-single/
+    # .env); blanking them makes it serve plain HTTP. Disabled for this
+    # deployment — the only client is the backend on localhost (loopback) and the
+    # port is firewalled to the VPC, so TLS adds friction (self-signed CA pinning)
+    # without protecting anything. Set true to restore HTTPS.
+    mcp_tls_enabled: false
     mcp_port: 8001
-    mcp_sse_url: "https://localhost:8001/sse"
-    # backend/.env.example ships MCP_TLS_CA_BUNDLE=../certs/cert.pem, but
-    # mcp_client.py resolves it relative to the repo root (one dir too high),
-    # so it must be pinned to an absolute path or tool-loading fails (tools=0).
-    backend_ca_bundle: "{{ mqacemcp_dir }}/certs/cert.pem"
+    mcp_sse_url: "{{ 'https' if mcp_tls_enabled else 'http' }}://localhost:8001/sse"
+    # Both must be set to enable HTTPS (paths relative to the repo root); blank
+    # disables TLS. backend_ca_bundle is only needed for HTTPS — mcp_client.py
+    # resolves a relative ../certs one dir too high, so an absolute path is used
+    # when enabled (tools=0 otherwise), and blank when TLS is off.
+    mcp_tls_cert: "{{ '../certs/cert.pem' if mcp_tls_enabled else '' }}"
+    mcp_tls_key: "{{ '../certs/key.pem' if mcp_tls_enabled else '' }}"
+    backend_ca_bundle: "{{ (mqacemcp_dir ~ '/certs/cert.pem') if mcp_tls_enabled else '' }}"
     # Dashboard port. dashboard_server.py reads MCP_DASHBOARD_PORT from the
     # process ENVIRONMENT only (no load_dotenv), and start-all.sh's start_service
     # never sources per-component .env files — so a dashboard/.env alone is
@@ -154,6 +161,18 @@
         line: "MCP_PORT={{ mcp_port }}"
       notify: restart mqacemcp
 
+    - name: Set MCP TLS cert/key (both blank = plain HTTP; both set = HTTPS)
+      ansible.builtin.lineinfile:
+        path: "{{ mcp_env }}"
+        regexp: "^{{ item.key }}="
+        line: "{{ item.key }}={{ item.value }}"
+      loop:
+        - { key: "MCP_TLS_CERT", value: "{{ mcp_tls_cert }}" }
+        - { key: "MCP_TLS_KEY", value: "{{ mcp_tls_key }}" }
+      loop_control:
+        label: "{{ item.key }}"
+      notify: restart mqacemcp
+
     - name: Set the MQ/ACE hostname allow-list (.env.example ships it empty = block all)
       ansible.builtin.lineinfile:
         path: "{{ mcp_env }}"
@@ -220,6 +239,12 @@
           # load_dotenv), so set it here or it defaults to :8002 and collides
           # with the chat backend.
           Environment=MCP_DASHBOARD_PORT={{ dashboard_port }}
+          # Streamlit runs behind the Caddy gateway (:8444). Disable CORS/XSRF so
+          # the proxied WebSocket/origin checks pass — the gateway already
+          # authenticates (Basic Auth), so this is safe. Inherited by the
+          # frontend child started by start-all.sh.
+          Environment=STREAMLIT_SERVER_ENABLE_CORS=false
+          Environment=STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION=false
           ExecStart=/bin/bash scripts/start-all.sh
           ExecStop=/bin/bash scripts/stop-all.sh
           TimeoutStartSec=0
@@ -240,5 +265,5 @@
         msg:
           - "mqacemcp stack at {{ mqacemcp_dir }} (per-component Python 3.13 venvs; Ansible's 3.9 untouched)"
           - "managed by systemd: mqacemcp.service  (ExecStart=start-all.sh, ExecStop=stop-all.sh)"
-          - "Ports pinned: MCP {{ mcp_port }} (https) · backend 8002 · UI 8003 · dashboard {{ dashboard_port }}"
+          - "Ports pinned: MCP {{ mcp_port }} ({{ 'https' if mcp_tls_enabled else 'http' }}) · backend 8002 · UI 8003 · dashboard {{ dashboard_port }}"
           - "For full function set OPENAI_API_KEY: aws ssm put-parameter --name {{ openai_ssm_param }} --type SecureString --value sk-... --region {{ aws_region }}, then: systemctl restart mqacemcp"

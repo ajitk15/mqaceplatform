@@ -15,14 +15,24 @@
 │       └───────────────┴─────────────────┴────────────────┘          │
 │                        SSH via SG rule                               │
 │  ┌────────────────────────────────────────┐                         │
-│  │         Ansible Control Node           │                         │
+│  │         Ansible Control Node (EIP)     │                         │
 │  │  Ansible · Status dashboard (:8090)    │                         │
 │  │  MQ+ACE MCP stack (:8001-:8004)        │                         │
+│  │  Caddy secure gateway (HTTPS + auth):  │                         │
+│  │    :443  → status dashboard            │                         │
+│  │    :8444 → Streamlit chat UI           │                         │
+│  │    :8445 → MCP log dashboard           │                         │
 │  └────────────────────────────────────────┘                         │
 │                                                                     │
-│  SSH key stored in AWS SSM Parameter Store (not in user_data)       │
+│  SSH key + secrets in AWS SSM Parameter Store (not in user_data)    │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+Human access from anywhere is via the **Caddy secure gateway** on the control
+node's **Elastic IP** (stable across rebuilds): one HTTPS endpoint per service,
+each behind Basic Auth. The raw service ports (`:8090`, `:8003`, `:8004`) stay
+restricted to the operator IP and are reached by Caddy over `localhost`. See
+[Secure remote access](#secure-remote-access-caddy-gateway).
 
 ## Prerequisites
 
@@ -34,9 +44,16 @@
 ## Quick Start
 
 ```bash
-# 1. Edit terraform.tfvars – set your IP
+# 1. Edit terraform.tfvars – set your IP (and optionally notify_email,
+#    gateway_username, gateway_allowed_cidr_blocks, mcp_allowed_cidr_blocks)
 #    Find your IP:  curl -s https://checkip.amazonaws.com
 vim terraform.tfvars   # replace YOUR_IP_HERE
+
+# 1b. Set the secure-gateway password hash in SSM (the install requires it;
+#     see "Secure remote access" below). Skip only if you set gateway access off.
+caddy hash-password --plaintext 'YOUR_PASSWORD'
+aws ssm put-parameter --name /rhel-mq-platform/gateway-password-hash \
+    --type SecureString --value '<the $2a$... hash>' --region us-east-1
 
 # 2. Initialise Terraform
 terraform init
@@ -58,6 +75,36 @@ terraform destroy -auto-approve
 ```
 
 Everything is tagged `ManagedBy = Terraform`. Nothing is left behind.
+
+---
+
+## Cost (free tier)
+
+**Not free if run 24/7.** The EC2 free tier covers ~1 t3.micro continuously
+(750 hrs/mo), but this deploys **4× t3.micro** + 4× 25 GB gp3 (100 GB) + public
+IPv4s — so most of it is beyond the free allowance.
+
+| Resource | Billed (after free allowance) | ~Monthly |
+|----------|-------------------------------|----------|
+| EC2 — 4× t3.micro (1 free) | 3 instances | ~$22 |
+| EBS — 100 GB gp3 (30 GB free) | 70 GB | ~$6 |
+| Public IPv4 — 4 addrs (1 free, $0.005/hr each since Feb 2024) | 3 | ~$11 |
+| SSM Parameter Store · SES · data-out | within free tier | ~$0 |
+| **Total (running 24/7)** | | **≈ $40–45 / mo** |
+
+- On the **new AWS "free plan"** (credit-based) this is **$0 out of pocket** — it
+  draws ~$40–45/mo from the promo credits (~$100–$200), lasting ~2–4 months.
+- On the **traditional 12-month free tier** you'd be **billed ~$40/mo** (only 1 of
+  4 instances fits the 750-hr allowance).
+- **Biggest saver — automated:** an EventBridge **stop/start schedule** is enabled
+  by default (`enable_instance_scheduler`) — stops all 4 instances at **21:00
+  daily** and starts them **08:00 Mon–Fri** (`scheduler_timezone`, default
+  `Asia/Kolkata`; cron via `instance_stop_cron` / `instance_start_cron`). While
+  stopped, compute → $0 (only ~$8/mo EBS remains). Data, private IPs (Ansible
+  inventory) and the control-node EIP persist, so the platform comes back
+  end-to-end on start (services are systemd-enabled; allow ~2–5 min to converge).
+- Or `terraform destroy` when fully done. Check actual spend in Billing →
+  **Bills** / **Free tier** / **Credits**.
 
 ---
 
@@ -102,11 +149,19 @@ Everything is tagged `ManagedBy = Terraform`. Nothing is left behind.
 | 9483 | ACE Web UI HTTPS |
 
 ### Ansible Control Node
-| Port | Purpose |
-|------|---------|
-| 22 | SSH |
-| 8090 | MQ/ACE status (validate) dashboard |
-| 8000–8010 | MQ+ACE MCP stack (8001 MCP server SSE/TLS · 8002 chat backend · 8003 Streamlit UI · 8004 log dashboard) |
+| Port | Purpose | Exposure |
+|------|---------|----------|
+| 22 | SSH | operator IP |
+| 8090 | MQ/ACE status (validate) dashboard | operator IP (public via gateway :443) |
+| 8000–8010 | MQ+ACE MCP stack (8001 MCP server SSE/HTTP+BasicAuth · 8002 chat backend · 8003 Streamlit UI · 8004 log dashboard) | operator IP (8001 also `mcp_allowed_cidr_blocks`) |
+| 443 | **Caddy gateway** → status dashboard (HTTPS + Basic Auth) | `gateway_allowed_cidr_blocks` |
+| 8444 | **Caddy gateway** → Streamlit chat UI (HTTPS + Basic Auth) | `gateway_allowed_cidr_blocks` |
+| 8445 | **Caddy gateway** → MCP log dashboard `/dashboard` (HTTPS + Basic Auth) | `gateway_allowed_cidr_blocks` |
+
+> The MCP server on `:8001` runs plain HTTP (TLS disabled — see `mcp_tls_enabled`
+> in `setup_mqacemcp.yml`) protected by Basic Auth; its only clients are the
+> local chat backend and, optionally, a remote backend allowed via
+> `mcp_allowed_cidr_blocks`.
 
 ---
 
@@ -136,7 +191,12 @@ sudo journalctl -u platform-install -f      # or: tail -f /var/log/platform-inst
 | `install_ace.yml` | Install IBM ACE on the MQ+ACE servers (Server 2 & 3) |
 | `schedule_dumps.yml` | Control node: every-30-min queue-manager / node config dump cron |
 | `setup_mqacemcp.yml` | Control node: clone the MQ+ACE MCP stack, build per-component Python 3.13 venvs, run under systemd |
+| `setup_gateway.yml` | Control node: Caddy secure gateway (`:443`/`:8444`/`:8445`, HTTPS + Basic Auth) fronting the dashboard, chat UI, and log dashboard |
 | `setup_ace_components.yml` | Create integration servers + deploy demo BARs (best-effort) |
+
+Two more scripts run outside `install_platform.yml`: `run_validate.sh`
+(every 2 min via cron) renders the `:8090` status dashboard, and
+`email_dashboard.sh` emails the dashboard as an HTML attachment via SES.
 
 The EC2 bootstrap (cloud-init) only prepares prerequisites and opens ports — all
 MQ/ACE install work happens in the playbooks above. To re-run or run a single
@@ -210,6 +270,50 @@ service state and admin REST endpoint.
 > Note on tooling: run these with the OS-supplied **ansible-core** (e.g. `/usr/bin/ansible-playbook`),
 > and ensure `/etc/ansible/ansible.cfg` uses `stdout_callback = default` (the
 > bundled `yaml` callback was removed in newer community.general).
+
+---
+
+## Secure remote access (Caddy gateway)
+
+The control node runs a **Caddy reverse-proxy gateway** that exposes the platform's
+web UIs over **one HTTPS endpoint per service**, each behind **Basic Auth**. This
+is the supported way to reach the platform from a restricted network: only the
+gateway ports are public, and Caddy talks to the real services over `localhost`,
+so the raw ports stay locked to the operator IP.
+
+| Endpoint | Serves |
+|----------|--------|
+| `https://<eip>` (`:443`) | MQ/ACE status dashboard |
+| `https://<eip>:8444` | Streamlit chat UI |
+| `https://<eip>:8445/dashboard` | MCP log dashboard |
+
+`<eip>` is the control node's **Elastic IP** (Terraform output `control_node_eip` /
+`gateway_url` / `chat_ui_url` / `log_dashboard_url`) — stable across rebuilds and
+restarts. TLS is a **self-signed cert** (no domain), so browsers show a one-time
+"untrusted" warning; add a real domain later for trusted Let's Encrypt certs.
+
+**One-time setup — set the gateway password** (its bcrypt hash lives in SSM, never
+in git/state):
+
+```bash
+# on the control node (or anywhere Caddy is installed)
+caddy hash-password --plaintext 'YOUR_PASSWORD'
+# store the hash so the node fetches it at deploy time
+aws ssm put-parameter --name /rhel-mq-platform/gateway-password-hash \
+    --type SecureString --value '<the $2a$... hash>' --region us-east-1
+```
+
+Login user is `var.gateway_username` (default `admin`); who may reach the gateway
+ports is `var.gateway_allowed_cidr_blocks` (default `["0.0.0.0/0"]` — safe because
+of TLS + Basic Auth; tighten to your CIDRs for stricter access).
+
+## Email notifications (SES)
+
+When the install finishes successfully, the control node **emails the dashboard**
+to `var.notify_email` via Amazon SES (free; the address is verified once as an SES
+identity — `aws_ses_email_identity.notify`). `email_dashboard.sh` attaches the
+rendered status dashboard as an HTML file, so it's readable even with no network
+path to the platform. Set `notify_email = ""` to disable.
 
 ---
 

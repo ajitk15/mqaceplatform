@@ -55,9 +55,11 @@ locals {
   # Ansible control node ports
   # 8090       – MQ/ACE status (validate) dashboard, served by validate-dashboard.service
   # 8000-8010  – MQ+ACE MCP stack (mqacemcp.service). Actual bindings within range:
-  #              8001 MCP server (SSE over TLS), 8002 chat backend (FastAPI),
-  #              8003 Streamlit UI, 8004 log dashboard. Range keeps headroom and
-  #              matches the firewalld rule opened in setup_mqacemcp.yml.
+  #              8001 MCP server (SSE, HTTP + Basic Auth — TLS disabled), 8002 chat
+  #              backend (FastAPI), 8003 Streamlit UI, 8004 log dashboard. Range keeps
+  #              headroom and matches the firewalld rule opened in setup_mqacemcp.yml.
+  #              These stay operator-IP only; remote/human access is via the Caddy
+  #              gateway (:443/:8444/:8445) and (for :8001) var.mcp_allowed_cidr_blocks.
   # ---------------------------------------------------------------------------
   ansible_ingress_rules = [
     { from_port = 22, to_port = 22, protocol = "tcp", cidr = var.allowed_cidr_blocks, description = "SSH from operator" },

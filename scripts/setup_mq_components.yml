@@ -88,6 +88,43 @@
       changed_when: false
       register: dspmq
 
+    # The mqsc scripts create the cluster QMs (e.g. MQREPO1/MQREPO2) but don't
+    # install systemd units, so without this they would NOT auto-start after a
+    # reboot / stop-start (e.g. the cost-saver scheduler) — degrading ACECLUSTER.
+    # Create + enable a unit for EVERY queue manager on the host (idempotent;
+    # identical to the one configure_mq.yml writes for the dev QM).
+    - name: Derive the queue managers on this host
+      ansible.builtin.set_fact:
+        host_qmgrs: "{{ dspmq.stdout | regex_findall('QMNAME\\(([^)]+)\\)') }}"
+
+    - name: Create a systemd unit for each queue manager (auto-start on boot)
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/mq-{{ item }}.service"
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=IBM MQ Queue Manager {{ item }}
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=forking
+          User=mqm
+          ExecStart={{ mq_install_dir }}/bin/strmqm {{ item }}
+          ExecStop={{ mq_install_dir }}/bin/endmqm -w {{ item }}
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+      loop: "{{ host_qmgrs }}"
+
+    - name: Enable each queue manager service on boot
+      ansible.builtin.systemd:
+        name: "mq-{{ item }}"
+        enabled: true
+        daemon_reload: true
+      loop: "{{ host_qmgrs }}"
+
     - name: Report queue managers
       ansible.builtin.debug:
-        msg: "{{ inventory_hostname }} → {{ dspmq.stdout_lines }}"
+        msg: "{{ inventory_hostname }} → {{ dspmq.stdout_lines }} (units enabled: {{ host_qmgrs }})"

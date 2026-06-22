@@ -94,6 +94,64 @@ variable "notify_email" {
   default     = ""
 }
 
+# CIDRs allowed to reach the MCP server on :8001 *in addition to* the operator
+# IP — for a remote chat backend (e.g. hosted on Render) that can't be pinned to
+# a single egress IP. Empty = no extra access. ["0.0.0.0/0"] opens it to the
+# whole internet (demo only: the MCP is plain HTTP protected solely by Basic
+# Auth, so rotate the default mcpadmin password before exposing it).
+variable "mcp_allowed_cidr_blocks" {
+  description = "Extra CIDRs allowed inbound to the MCP server on :8001 (e.g. a remote backend). Empty = none."
+  type        = list(string)
+  default     = []
+}
+
+# Secure gateway (Caddy on the control node) — fronts the platform's web
+# services behind one HTTPS endpoint (:443) with Basic Auth, so the otherwise
+# auth-less dashboard isn't exposed directly. Username for the gateway login;
+# the password's bcrypt hash is read from SSM /<platform>/gateway-password-hash.
+variable "gateway_username" {
+  description = "Basic-auth username for the Caddy secure gateway on :443"
+  type        = string
+  default     = "admin"
+}
+
+# CIDRs allowed to reach the gateway on :443. TLS + Basic Auth protect it, so
+# ["0.0.0.0/0"] is acceptable (demo). Empty = no gateway access rule created.
+variable "gateway_allowed_cidr_blocks" {
+  description = "CIDRs allowed inbound to the secure gateway on :443"
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+}
+
+# Auto stop/start the EC2 instances on a schedule to save cost / stretch free
+# credits (stop overnight, start on weekday mornings). Implemented with
+# EventBridge Scheduler calling the EC2 API directly (no Lambda). Data persists
+# across stop/start; private IPs (Ansible inventory) and the control-node EIP are
+# unchanged, so the platform comes back end-to-end on start.
+variable "enable_instance_scheduler" {
+  description = "Create EventBridge schedules to auto stop/start all platform EC2 instances"
+  type        = bool
+  default     = true
+}
+
+variable "scheduler_timezone" {
+  description = "IANA timezone for the stop/start cron schedules (e.g. Asia/Kolkata, UTC)"
+  type        = string
+  default     = "Asia/Kolkata"
+}
+
+variable "instance_stop_cron" {
+  description = "EventBridge Scheduler cron for stopping instances (default 21:00 daily)"
+  type        = string
+  default     = "cron(0 21 * * ? *)"
+}
+
+variable "instance_start_cron" {
+  description = "EventBridge Scheduler cron for starting instances (default 08:00 Mon-Fri)"
+  type        = string
+  default     = "cron(0 8 ? * MON-FRI *)"
+}
+
 # Optional: private S3 bucket holding the IBM MQ/ACE developer binaries.
 # Leave empty to skip granting S3 access (default). Set it to enable the
 # Ansible control node to pull binaries from S3 (see scripts/install_platform.yml).

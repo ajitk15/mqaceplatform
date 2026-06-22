@@ -64,7 +64,36 @@ output "ready_notification_identity" {
   value       = var.notify_email != "" ? aws_ses_email_identity.notify[0].email : ""
 }
 
+output "control_node_eip" {
+  description = "Stable Elastic IP of the Ansible control node"
+  value       = aws_eip.ansible_control.public_ip
+}
+
+output "gateway_url" {
+  description = "Secure HTTPS gateway (Caddy, Basic Auth) fronting the platform dashboard"
+  value       = "https://${aws_eip.ansible_control.public_ip}"
+}
+
+output "chat_ui_url" {
+  description = "Secure HTTPS gateway for the Streamlit chat UI (Caddy, Basic Auth)"
+  value       = "https://${aws_eip.ansible_control.public_ip}:8444"
+}
+
+output "log_dashboard_url" {
+  description = "Secure HTTPS gateway for the MCP log dashboard (Caddy, Basic Auth)"
+  value       = "https://${aws_eip.ansible_control.public_ip}:8445/dashboard"
+}
+
+output "instance_schedule" {
+  description = "Auto stop/start schedule for the platform EC2 instances"
+  value = var.enable_instance_scheduler ? {
+    stop     = var.instance_stop_cron
+    start    = var.instance_start_cron
+    timezone = var.scheduler_timezone
+  } : null
+}
+
 output "dashboard_url" {
-  description = "MQ/ACE status dashboard (:8090) on the Ansible control node"
-  value       = "http://${module.ansible_control.public_ip}:8090"
+  description = "MQ/ACE status dashboard — reach it via the secure gateway; :8090 direct is operator-IP only"
+  value       = "https://${aws_eip.ansible_control.public_ip} (via gateway)  ·  http://${aws_eip.ansible_control.public_ip}:8090 (operator IP only)"
 }

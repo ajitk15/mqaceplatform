@@ -2,6 +2,9 @@
 # Data Sources
 ###############################################################################
 
+# Current account ID — used to scope IAM policies to specific resource ARNs.
+data "aws_caller_identity" "current" {}
+
 # Latest Red Hat Enterprise Linux 9 AMI (official Red Hat owner)
 data "aws_ami" "rhel" {
   most_recent = true

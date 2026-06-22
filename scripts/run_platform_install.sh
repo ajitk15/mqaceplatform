@@ -82,45 +82,13 @@ echo "=== install_platform.yml finished, rc=$RC ==="
 # --- 4. Render the dashboard immediately ---------------------------------------
 /usr/local/bin/run_validate.sh || true
 
-# --- 5. Email the dashboard URL via SES (only on a clean install) --------------
-# Free, no SMTP/password: sends from/to the verified SES address written by
-# Terraform into /etc/platform-notify.conf. The address must be SES-verified once.
-notify_ready() {
-  [ -r /etc/platform-notify.conf ] || { echo "notify: no /etc/platform-notify.conf — skipping"; return; }
-  # shellcheck disable=SC1091
-  . /etc/platform-notify.conf
-  [ -n "${NOTIFY_EMAIL:-}" ] || { echo "notify: NOTIFY_EMAIL empty — skipping"; return; }
-
-  # IMDSv2 token (falls back to IMDSv1 if token fetch fails).
-  local tok ip region port url body msg
-  tok=$(curl -s --max-time 3 -X PUT "http://169.254.169.254/latest/api/token" \
-        -H "X-aws-ec2-metadata-token-ttl-seconds: 60" || true)
-  ip=$(curl -s --max-time 3 ${tok:+-H "X-aws-ec2-metadata-token: $tok"} \
-        http://169.254.169.254/latest/meta-data/public-ipv4 || echo unknown)
-  region=${AWS_DEFAULT_REGION:-us-east-1}
-  port="${DASHBOARD_PORT:-8090}"
-  url="http://${ip}:${port}"
-
-  body="Your IBM MQ/ACE platform install finished successfully.\n\nDashboard: ${url}\n\n(Generated automatically at $(date -u +%Y-%m-%dT%H:%M:%SZ) by run_platform_install.sh)"
-  msg=$(mktemp /tmp/ses-ready.XXXXXX.json)
-  cat > "$msg" <<JSON
-{
-  "Source": "${NOTIFY_EMAIL}",
-  "Destination": { "ToAddresses": ["${NOTIFY_EMAIL}"] },
-  "Message": {
-    "Subject": { "Data": "MQ/ACE platform is ready", "Charset": "UTF-8" },
-    "Body": { "Text": { "Data": "${body}", "Charset": "UTF-8" } }
-  }
-}
-JSON
-  aws ses send-email --region "$region" --cli-input-json "file://$msg" \
-    && echo "notify: sent ready email to $NOTIFY_EMAIL ($url)" \
-    || echo "notify: SES send-email failed (non-fatal)"
-  rm -f "$msg"
-}
-
+# --- 5. Email the dashboard as an HTML attachment via SES (on a clean install) -
+# Firewall-proof delivery: the recipient opens the attached .html locally in a
+# browser — no network access to the AWS public IP, and no tunnel (Cloudflare etc.
+# are blocked on the target network). email_dashboard.sh builds a MIME message
+# with the rendered :8090 dashboard attached and sends it via SES send-raw-email.
 if [ "$RC" -eq 0 ]; then
-  notify_ready || true
+  SUBJECT="MQ/ACE platform is ready — dashboard attached" /usr/local/bin/email_dashboard.sh || true
 else
   echo "notify: install rc=$RC (not 0) — skipping ready notification"
 fi

@@ -82,6 +82,18 @@
           <tr><td colspan="2" class="muted">MCP stack not detected</td></tr>
         {% endfor %}
 
+        <tr class="sec"><td colspan="2">Secure access (Caddy gateway · HTTPS + login)</td></tr>
+        {% for e in gateway_endpoints | default([]) %}
+          {% set p = e.split('|') %}
+          {% set url = 'https://' ~ (ctl_public_ip | default('localhost')) ~ ':' ~ p[1] ~ p[2] %}
+          <tr>
+            <td>{{ p[0] }}<br><span class="muted"><a class="link" href="{{ url }}" target="_blank">{{ url }}</a> · Basic Auth (user: admin)</span></td>
+            <td><span class="badge {{ 'PASS' if (p[3] == 'UP') else 'FAIL' }}">{{ p[3] }}{% if p[4] | default('') and p[4] not in ['200', '401'] %} ({{ p[4] }}){% endif %}</span></td>
+          </tr>
+        {% else %}
+          <tr><td colspan="2" class="muted">Gateway not detected</td></tr>
+        {% endfor %}
+
         <tr class="sec"><td colspan="2">Config dump downloads</td></tr>
         {% for c in ctl_csv_files | default([]) %}
           {% set f = c.split('|') %}

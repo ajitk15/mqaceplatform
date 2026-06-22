@@ -7,6 +7,9 @@
 .terraform/
 .terraform.lock.hcl
 
+# Saved plan files – binary artifacts that can contain secrets in plaintext
+*.tfplan
+
 # Generated SSH private key – NEVER commit this
 *.pem
 

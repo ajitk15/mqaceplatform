@@ -291,6 +291,168 @@ module "sg_ansible" {
   ingress_rules = local.ansible_ingress_rules
 }
 
+# Allow a remote chat backend (e.g. on Render, which has no single pinnable
+# egress IP) to reach the MCP server on :8001. Only :8001 is opened — the rest
+# of 8000-8010 stays restricted to the operator IP. Created only when
+# var.mcp_allowed_cidr_blocks is set. NOTE: the MCP is plain HTTP + Basic Auth,
+# so opening this to 0.0.0.0/0 is a demo-grade exposure — rotate the default
+# mcpadmin password and consider re-enabling TLS for anything beyond a demo.
+resource "aws_security_group_rule" "ansible_mcp_remote" {
+  count             = length(var.mcp_allowed_cidr_blocks) > 0 ? 1 : 0
+  type              = "ingress"
+  security_group_id = module.sg_ansible.sg_id
+  from_port         = 8001
+  to_port           = 8001
+  protocol          = "tcp"
+  cidr_blocks       = var.mcp_allowed_cidr_blocks
+  description       = "MCP server (:8001) for remote chat backend"
+}
+
+# Secure gateway (Caddy on the control node): single HTTPS endpoint on :443,
+# Basic Auth + TLS, reverse-proxying the platform's web services over localhost.
+# Only :443 is exposed for human access; the individual service ports (8090
+# dashboard, etc.) stay restricted to the operator IP and are reached via
+# localhost. Created only when var.gateway_allowed_cidr_blocks is set.
+resource "aws_security_group_rule" "ansible_gateway" {
+  count             = length(var.gateway_allowed_cidr_blocks) > 0 ? 1 : 0
+  type              = "ingress"
+  security_group_id = module.sg_ansible.sg_id
+  from_port         = 443
+  to_port           = 443
+  protocol          = "tcp"
+  cidr_blocks       = var.gateway_allowed_cidr_blocks
+  description       = "Caddy secure gateway (HTTPS, Basic Auth) - dashboard"
+}
+
+# Second gateway listener: Streamlit chat UI (Caddy :8444 -> localhost:8003),
+# same HTTPS + Basic Auth. The UI's own :8003 stays operator-IP only.
+resource "aws_security_group_rule" "ansible_chatui" {
+  count             = length(var.gateway_allowed_cidr_blocks) > 0 ? 1 : 0
+  type              = "ingress"
+  security_group_id = module.sg_ansible.sg_id
+  from_port         = 8444
+  to_port           = 8444
+  protocol          = "tcp"
+  cidr_blocks       = var.gateway_allowed_cidr_blocks
+  description       = "Caddy secure gateway (HTTPS, Basic Auth) - Streamlit chat UI"
+}
+
+# Third gateway listener: MQ+ACE MCP log dashboard (Caddy :8445 -> localhost:8004).
+resource "aws_security_group_rule" "ansible_logdash" {
+  count             = length(var.gateway_allowed_cidr_blocks) > 0 ? 1 : 0
+  type              = "ingress"
+  security_group_id = module.sg_ansible.sg_id
+  from_port         = 8445
+  to_port           = 8445
+  protocol          = "tcp"
+  cidr_blocks       = var.gateway_allowed_cidr_blocks
+  description       = "Caddy secure gateway (HTTPS, Basic Auth) - MCP log dashboard"
+}
+
+# Elastic IP for the control node so the gateway endpoint (and the self-signed
+# cert's IP SAN) stay stable across instance stop/start and rebuilds — otherwise
+# the public IP changes on every redeploy.
+resource "aws_eip" "ansible_control" {
+  domain = "vpc"
+  tags   = merge(local.common_tags, { Name = "${var.platform_name}-ansible-eip" })
+}
+
+resource "aws_eip_association" "ansible_control" {
+  instance_id   = module.ansible_control.instance_id
+  allocation_id = aws_eip.ansible_control.id
+}
+
+###############################################################################
+# Auto stop/start scheduler (cost saver) — EventBridge Scheduler calls the EC2
+# API directly (no Lambda). All four instances stop overnight and start on
+# weekday mornings; data + private IPs + the EIP persist, so the platform comes
+# back end-to-end on start (services are systemd-enabled). Toggle with
+# var.enable_instance_scheduler.
+###############################################################################
+locals {
+  platform_instance_ids = [
+    module.server1.instance_id,
+    module.server2.instance_id,
+    module.server3.instance_id,
+    module.ansible_control.instance_id,
+  ]
+  platform_instance_arns = [
+    for id in local.platform_instance_ids :
+    "arn:aws:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:instance/${id}"
+  ]
+}
+
+resource "aws_iam_role" "scheduler" {
+  count = var.enable_instance_scheduler ? 1 : 0
+  name  = "${var.platform_name}-scheduler-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "scheduler.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy" "scheduler_ec2" {
+  count = var.enable_instance_scheduler ? 1 : 0
+  name  = "start-stop-platform-instances"
+  role  = aws_iam_role.scheduler[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["ec2:StartInstances", "ec2:StopInstances"]
+      Resource = local.platform_instance_arns
+    }]
+  })
+}
+
+resource "aws_scheduler_schedule" "stop_instances" {
+  count       = var.enable_instance_scheduler ? 1 : 0
+  name        = "${var.platform_name}-stop-instances"
+  description = "Stop all platform EC2 instances to save cost"
+  group_name  = "default"
+
+  flexible_time_window {
+    mode = "OFF"
+  }
+
+  schedule_expression          = var.instance_stop_cron
+  schedule_expression_timezone = var.scheduler_timezone
+
+  target {
+    arn      = "arn:aws:scheduler:::aws-sdk:ec2:stopInstances"
+    role_arn = aws_iam_role.scheduler[0].arn
+    input    = jsonencode({ InstanceIds = local.platform_instance_ids })
+  }
+}
+
+resource "aws_scheduler_schedule" "start_instances" {
+  count       = var.enable_instance_scheduler ? 1 : 0
+  name        = "${var.platform_name}-start-instances"
+  description = "Start all platform EC2 instances"
+  group_name  = "default"
+
+  flexible_time_window {
+    mode = "OFF"
+  }
+
+  schedule_expression          = var.instance_start_cron
+  schedule_expression_timezone = var.scheduler_timezone
+
+  target {
+    arn      = "arn:aws:scheduler:::aws-sdk:ec2:startInstances"
+    role_arn = aws_iam_role.scheduler[0].arn
+    input    = jsonencode({ InstanceIds = local.platform_instance_ids })
+  }
+}
+
 ###############################################################################
 # MQ-only Servers  (Server 1 & 4)
 ###############################################################################
@@ -435,10 +597,11 @@ resource "terraform_data" "deploy_playbooks" {
       "sudo chown -R root:root /etc/ansible/playbooks",
       "sudo install -m 0755 /etc/ansible/playbooks/run_platform_install.sh /usr/local/bin/run_platform_install.sh",
       "sudo install -m 0755 /etc/ansible/playbooks/run_validate.sh /usr/local/bin/run_validate.sh",
+      "sudo install -m 0755 /etc/ansible/playbooks/email_dashboard.sh /usr/local/bin/email_dashboard.sh",
       # Drop the "platform ready" notification config (verified SES sender) so
-      # run_platform_install.sh can email the dashboard URL on success. Rewritten
-      # on every apply, so no instance replacement is needed to (re)configure it.
-      "printf 'NOTIFY_EMAIL=%s\\nDASHBOARD_PORT=8090\\nAWS_DEFAULT_REGION=${var.aws_region}\\n' '${var.notify_email}' | sudo tee /etc/platform-notify.conf >/dev/null",
+      # run_platform_install.sh can email the dashboard snapshot on success.
+      # Rewritten on every apply, so no instance replacement is needed to reconfigure.
+      "printf 'NOTIFY_EMAIL=%s\\nDASHBOARD_PORT=8090\\nAWS_DEFAULT_REGION=${var.aws_region}\\nDASHBOARD_HTML=/home/${var.rhel_user}/validate-www/index.html\\n' '${var.notify_email}' | sudo tee /etc/platform-notify.conf >/dev/null",
       "echo 'Playbooks deployed to /etc/ansible/playbooks/'",
       # Detached transient unit: survives this SSH session; apply returns at once.
       "sudo systemctl stop platform-install.service 2>/dev/null || true",
