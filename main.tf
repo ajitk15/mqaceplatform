@@ -24,6 +24,10 @@ terraform {
       source  = "hashicorp/local"
       version = "~> 2.0"
     }
+    http = {
+      source  = "hashicorp/http"
+      version = "~> 3.4"
+    }
   }
 
   # FIX #7 – remote state with encryption + locking
@@ -546,7 +550,7 @@ resource "local_file" "ansible_inventory" {
     server1_ip   = module.server1.public_ip
     server2_ip   = module.server2.public_ip
     server3_ip   = module.server3.public_ip
-    ansible_ip   = module.ansible_control.public_ip
+    ansible_ip   = aws_eip.ansible_control.public_ip
     ssh_key_file = "${path.module}/${var.platform_name}-key.pem"
     ansible_user = var.rhel_user
   })
@@ -564,9 +568,15 @@ resource "terraform_data" "deploy_playbooks" {
     sha1(join("", [for f in fileset("${path.module}/scripts", "**") : filesha1("${path.module}/scripts/${f}")])),
   ]
 
+  # Must wait for the EIP to be associated: associating the EIP REPLACES the
+  # instance's auto-assigned public IP, so connecting to module.ansible_control.public_ip
+  # (the ephemeral IP captured at launch) hits a dead address and times out.
+  # Connect to the stable EIP instead, and depend on the association completing.
+  depends_on = [aws_eip_association.ansible_control]
+
   connection {
     type        = "ssh"
-    host        = module.ansible_control.public_ip
+    host        = aws_eip.ansible_control.public_ip
     user        = var.rhel_user
     private_key = tls_private_key.platform.private_key_pem
     timeout     = "10m"

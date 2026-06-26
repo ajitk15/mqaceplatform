@@ -8,8 +8,8 @@
 # open (the individual ports stay restricted to the operator IP in the SG).
 #
 # TLS: self-signed cert (no domain) with the node's public IP as SAN — browsers
-# show a one-time "untrusted" warning. Auth: bcrypt hash from SSM SecureString
-# /<platform>/gateway-password-hash (set once, see fail_msg below).
+# show a one-time "untrusted" warning. Auth: fixed Basic Auth creds (admin /
+# gway123); the bcrypt hash is generated at deploy time via `caddy hash-password`.
 #
 # Add more services later as extra site blocks / listener ports in the Caddyfile
 # (e.g. :8443 -> https://localhost:9443 MQ Web Console).
@@ -21,9 +21,8 @@
   become: true
   gather_facts: false
   vars:
-    aws_region: "us-east-1"
     gateway_username: "admin"
-    gateway_hash_ssm_param: "/rhel-mq-platform/gateway-password-hash"
+    gateway_password: "gway123"
     caddy_bin: "/usr/local/bin/caddy"
     caddy_dir: "/etc/caddy"
     dashboard_upstream: "localhost:8090"
@@ -88,26 +87,18 @@
         creates: "{{ caddy_dir }}/tls/cert.pem"
       notify: restart caddy
 
-    - name: Look up the gateway password hash from SSM Parameter Store
-      ansible.builtin.command: >-
-        aws ssm get-parameter --name {{ gateway_hash_ssm_param }} --with-decryption
-        --query Parameter.Value --output text --region {{ aws_region }}
+    - name: Generate the gateway password bcrypt hash with caddy
+      ansible.builtin.command: "{{ caddy_bin }} hash-password --plaintext {{ gateway_password }}"
       register: gw_hash
       changed_when: false
-      failed_when: false
       no_log: true
 
-    - name: Require the gateway password hash to be set in SSM
+    - name: Require a valid bcrypt hash
       ansible.builtin.assert:
         that:
           - gw_hash.rc == 0
-          - (gw_hash.stdout | trim | length) > 0
-          - "'None' not in gw_hash.stdout"
-        fail_msg: >-
-          Gateway password hash missing. Set it once:
-          {{ caddy_bin }} hash-password --plaintext '<PASSWORD>'  then
-          aws ssm put-parameter --name {{ gateway_hash_ssm_param }} --type SecureString
-          --value '<the $2a$... hash>' --region {{ aws_region }}
+          - gw_hash.stdout | trim is match('^\$2[aby]\$')
+        fail_msg: "caddy hash-password did not return a bcrypt hash (got '{{ gw_hash.stdout | trim }}')."
 
     - name: Write the gateway env file (user + bcrypt hash)
       ansible.builtin.copy:
@@ -207,7 +198,7 @@
     - name: Report
       ansible.builtin.debug:
         msg:
-          - "Secure gateway live (Basic Auth user: {{ gateway_username }}, self-signed cert — accept the warning once):"
+          - "Secure gateway live (Basic Auth {{ gateway_username }}/{{ gateway_password }}, self-signed cert — accept the warning once):"
           - "  Dashboard : https://{{ public_ip.stdout | trim }}        -> {{ dashboard_upstream }}"
           - "  Chat UI   : https://{{ public_ip.stdout | trim }}:8444   -> {{ chatui_upstream }}"
           - "  Log dash  : https://{{ public_ip.stdout | trim }}:8445/dashboard -> {{ logdash_upstream }}"

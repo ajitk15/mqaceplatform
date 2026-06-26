@@ -104,6 +104,19 @@
         {% else %}
           <tr><td colspan="2" class="muted">No dump CSVs yet (run every 30 min)</td></tr>
         {% endfor %}
+
+        <tr class="sec"><td colspan="2">Documentation &amp; references</td></tr>
+        {% if ctl_doc_files | default([]) %}
+          {% for d in ctl_doc_files %}
+            {% set df = d.split('|') %}
+            <tr>
+              <td>{{ df[1] | default(df[0]) }}<br><span class="muted">{{ df[2] | default('') }}</span></td>
+              <td><a class="link" href="{{ df[0] }}" target="_blank">open</a></td>
+            </tr>
+          {% endfor %}
+        {% else %}
+          <tr><td colspan="2" class="muted">No reference docs published</td></tr>
+        {% endif %}
       </table>
     </div>
   {% for host in groups['all_mq_servers'] | sort %}

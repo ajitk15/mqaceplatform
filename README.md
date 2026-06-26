@@ -49,11 +49,8 @@ restricted to the operator IP and are reached by Caddy over `localhost`. See
 #    Find your IP:  curl -s https://checkip.amazonaws.com
 vim terraform.tfvars   # replace YOUR_IP_HERE
 
-# 1b. Set the secure-gateway password hash in SSM (the install requires it;
-#     see "Secure remote access" below). Skip only if you set gateway access off.
-caddy hash-password --plaintext 'YOUR_PASSWORD'
-aws ssm put-parameter --name /rhel-mq-platform/gateway-password-hash \
-    --type SecureString --value '<the $2a$... hash>' --region us-east-1
+# 1b. (Nothing to do for the gateway password — it's a fixed Basic Auth
+#      credential, admin / gway123, hashed at deploy time by the playbook.)
 
 # 2. Initialise Terraform
 terraform init
@@ -292,16 +289,10 @@ so the raw ports stay locked to the operator IP.
 restarts. TLS is a **self-signed cert** (no domain), so browsers show a one-time
 "untrusted" warning; add a real domain later for trusted Let's Encrypt certs.
 
-**One-time setup — set the gateway password** (its bcrypt hash lives in SSM, never
-in git/state):
-
-```bash
-# on the control node (or anywhere Caddy is installed)
-caddy hash-password --plaintext 'YOUR_PASSWORD'
-# store the hash so the node fetches it at deploy time
-aws ssm put-parameter --name /rhel-mq-platform/gateway-password-hash \
-    --type SecureString --value '<the $2a$... hash>' --region us-east-1
-```
+**Gateway login is a fixed Basic Auth credential — `admin` / `gway123`.** The
+playbook generates the bcrypt hash at deploy time with `caddy hash-password`
+(no plaintext or hash in git/state); change it by editing `gateway_password` in
+`scripts/setup_gateway.yml`.
 
 Login user is `var.gateway_username` (default `admin`); who may reach the gateway
 ports is `var.gateway_allowed_cidr_blocks` (default `["0.0.0.0/0"]` — safe because

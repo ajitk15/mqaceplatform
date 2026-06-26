@@ -168,6 +168,28 @@
       ansible.builtin.set_fact:
         ctl_csv_files: "{{ ctl_csvs.stdout_lines | default([]) }}"
 
+    - name: Publish reference docs (web/*.html) into the web dir
+      ansible.builtin.shell: |
+        src="{{ playbook_dir }}/web"
+        [ -d "$src" ] || exit 0
+        for f in "$src"/*.html; do
+          [ -f "$f" ] || continue
+          base=$(basename "$f")
+          install -m 0644 "$f" "{{ dashboard_dir }}/$base"
+          title=$(sed -n 's:.*<title>\(.*\)</title>.*:\1:p' "$f" | head -1)
+          [ -n "$title" ] || title="$base"
+          sz=$(du -h "$f" | cut -f1)
+          ts=$(date -r "$f" '+%Y-%m-%d %H:%M:%S %Z')
+          echo "$base|$title|$sz · updated $ts"
+        done
+      register: ctl_docs
+      changed_when: false
+      failed_when: false
+
+    - name: Record published reference docs
+      ansible.builtin.set_fact:
+        ctl_doc_files: "{{ ctl_docs.stdout_lines | default([]) }}"
+
     - name: Probe the MQ+ACE MCP stack endpoints (health checks, localhost)
       ansible.builtin.shell: |
         repo=/opt/apps/mqaceserver/mqacemcp

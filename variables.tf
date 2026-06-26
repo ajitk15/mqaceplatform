@@ -68,13 +68,22 @@ variable "python_version" {
 }
 
 # FIX #11 – no default; operator must explicitly set their IP
-variable "allowed_cidr_blocks" {
-  description = "CIDR blocks allowed to reach SSH and management ports. Must be set explicitly (e.g. [\"YOUR_IP/32\"])."
-  type        = list(string)
+variable "auto_detect_ip" {
+  description = "When true, auto-detect the public IP of the machine running terraform and add it (/32) to the operator SSH/management SG rules. Avoids hand-editing allowed_cidr_blocks when your ISP rotates your IP."
+  type        = bool
+  default     = true
+}
 
+variable "allowed_cidr_blocks" {
+  description = "Extra CIDR blocks allowed to reach SSH and management ports, in addition to the auto-detected IP. Leave empty to rely solely on auto_detect_ip; set explicitly (e.g. [\"1.2.3.4/32\"]) for a fixed office IP or when auto_detect_ip = false."
+  type        = list(string)
+  default     = []
+
+  # Guard against a total lockout: if auto-detection is off, at least one
+  # static CIDR must be supplied, otherwise no rule would open port 22.
   validation {
-    condition     = length(var.allowed_cidr_blocks) > 0
-    error_message = "allowed_cidr_blocks must not be empty. Set it to your IP, e.g. [\"1.2.3.4/32\"]."
+    condition     = var.auto_detect_ip || length(var.allowed_cidr_blocks) > 0
+    error_message = "With auto_detect_ip = false, allowed_cidr_blocks must list at least one CIDR (e.g. [\"1.2.3.4/32\"]) or you will lock yourself out of SSH."
   }
 }
 
@@ -108,7 +117,8 @@ variable "mcp_allowed_cidr_blocks" {
 # Secure gateway (Caddy on the control node) — fronts the platform's web
 # services behind one HTTPS endpoint (:443) with Basic Auth, so the otherwise
 # auth-less dashboard isn't exposed directly. Username for the gateway login;
-# the password's bcrypt hash is read from SSM /<platform>/gateway-password-hash.
+# the password is fixed (admin / gway123) and hashed at deploy time by the
+# playbook via `caddy hash-password` (see scripts/setup_gateway.yml).
 variable "gateway_username" {
   description = "Basic-auth username for the Caddy secure gateway on :443"
   type        = string
