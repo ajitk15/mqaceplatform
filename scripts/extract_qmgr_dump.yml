@@ -12,7 +12,7 @@
 #      (-a = all attributes, -o 1line = one MQSC command per line — same tool
 #       as the sample `dmpmqcfg -m QM2 -t queue -a -o 1line`, but with no
 #       object-type filter so QMGR/queues/channels/topics/auth records are all
-#       captured, matching the reference resources/qmgr_dump.csv).
+#       captured).
 #   3. Turn each DEFINE/ALTER/SET line into a pipe-delimited CSV row:
 #         extractedat|hostname|qmname|objecttype|objectdef
 #      where objecttype is the MQSC object keyword (QLOCAL, QALIAS, CHANNEL …).
