@@ -9,8 +9,8 @@
 # ACE : integration server service active + admin REST endpoint answering
 ###############################################################################
 
-- name: Verify IBM MQ dev queue manager (QM1) on server1
-  hosts: mq_only          # QM1 + DEV.QUEUE.1 + mqweb console live only on server1
+- name: Verify IBM MQ dev queue manager (MQQM1) on server1
+  hosts: mq_only          # MQQM1 + DEV.QUEUE.1 + mqweb console live only on server1
   become: true
   gather_facts: false
   vars_files:
@@ -209,7 +209,7 @@
     - name: Done
       ansible.builtin.debug:
         msg:
-          - "MQ  dev queue manager (QM1) put/get round-trip verified on server1"
+          - "MQ  dev queue manager (MQQM1) put/get round-trip verified on server1"
           - "MQ  Console (mqweb) running + HTTPS 9443 verified on server1"
           - "MQ  ACECLUSTER health verified: every cluster QM sees both full repositories (MQREPO1, MQREPO2)"
           - "ACE integration server + admin API verified on mq_ace servers"

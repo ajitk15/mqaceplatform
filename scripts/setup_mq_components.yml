@@ -5,9 +5,9 @@
 # scripts/mqsetup/.
 #
 # Run AFTER install_mq.yml. Each MQ server gets the matching script by name:
-#   server1 -> mqsetup/server1_full_setup.mqsc   (MQREPO1 full repo + MQQM1)
-#   server2 -> mqsetup/server2_full_setup.mqsc   (MQREPO2 full repo + MQQM2)
-#   server3 -> mqsetup/server3_full_setup.mqsc   (MQQM3 + MQQM4)
+#   server1 -> mqsetup/server1_full_setup.mqsc   (MQREPO1 full repo + dev MQQM1)
+#   server2 -> mqsetup/server2_full_setup.mqsc   (MQREPO2 full repo + MQNODE1)
+#   server3 -> mqsetup/server3_full_setup.mqsc   (MQNODE2)
 # which together build the ACECLUSTER cluster.
 #
 #   ansible-playbook -i /etc/ansible/hosts setup_mq_components.yml

@@ -27,7 +27,7 @@ locals {
   # ---------------------------------------------------------------------------
   # IBM MQ default ports
   # 1414-1421 – MQ listeners within the VPC (CLUSRCVR/CLUSSDR cluster channels):
-  #             1414 MQREPO1 (full repo, server1), 1415 QM1 (dev, server1),
+  #             1414 MQREPO1 (full repo, server1), 1415 MQQM1 (dev, server1),
   #             1416 MQREPO2 (full repo, server2), 1420 MQNODE1 (server2),
   #             1421 MQNODE2 (server3). 1417-1419 currently unused.
   # 9443  – MQ Web Console HTTPS

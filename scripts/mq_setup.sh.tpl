@@ -90,8 +90,8 @@ echo "=== [6/6] IBM MQ installation placeholder ==="
 # IBM MQ requires a licence from IBM Passport Advantage.
 # After placing the RPM at /opt/mq-binaries/ run the Ansible playbook:
 #   dnf install -y /opt/mq-binaries/ibm-mqadvanced-server-dev-*.x86_64.rpm
-#   /opt/mqm/bin/crtmqm QM1
-#   /opt/mqm/bin/strmqm QM1
+#   /opt/mqm/bin/crtmqm MQQM1
+#   /opt/mqm/bin/strmqm MQQM1
 mkdir -p /opt/mq-binaries
 
 echo "=== Bootstrap complete ==="

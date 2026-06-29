@@ -11,11 +11,13 @@
 #   chmod -R ug=rwx,o=rx /opt/ibm/ace-13.0.7.0
 #   mqm .bash_profile:  . /opt/ibm/ace-13.0.7.0/server/bin/mqsiprofile
 #
-# Then creates an associated queue manager (NODE1 -> MQNODE1, NODE2 -> MQNODE2),
-# creates the integration node bound to it (mqsicreatebroker -q), sets its web
-# admin port, starts it, and enables both on boot.
+# The associated queue manager (NODE1 -> MQNODE1, NODE2 -> MQNODE2) is created
+# upstream by setup_mq_components.yml (scripts/mqsetup/serverN_full_setup.mqsc).
+# This playbook creates the integration node bound to it (mqsicreatebroker -q),
+# sets its web admin port, starts it, and enables it on boot.
 #
 #   ansible-playbook -i /etc/ansible/hosts install_ace.yml
+#   (run AFTER setup_mq_components.yml so MQNODE1/MQNODE2 already exist)
 ###############################################################################
 
 - name: Install IBM ACE 13 and create the integration node
@@ -30,7 +32,8 @@
     mqsiprofile: "{{ ace_install_parent }}/ace-{{ ace_version }}/server/bin/mqsiprofile"
     node_name: "{{ ace_node_map[inventory_hostname] }}"
     node_qmgr: "{{ ace_node_qmgr_map[inventory_hostname] }}"
-    node_qmgr_port: "{{ ace_node_qmgr_port_map[inventory_hostname] }}"
+    # node_qmgr_port (ace_node_qmgr_port_map) is now hardcoded in the MQNODE
+    # listener/CLUSRCVR defs in scripts/mqsetup/serverN_full_setup.mqsc.
 
   tasks:
     # --- 0. Swap (free-tier RAM) --------------------------------------------
@@ -131,95 +134,16 @@
         mode: "0775"
 
     # --- 4a. Associated queue manager (NODE1 -> MQNODE1, NODE2 -> MQNODE2) ---
-    - name: Check whether the associated queue manager {{ node_qmgr }} exists
+    # The queue manager {{ node_qmgr }} (listener, cluster channels joining
+    # {{ ace_cluster_name }}, ACE work queues) and its systemd unit are created
+    # upstream by setup_mq_components.yml from scripts/mqsetup/{{ inventory_hostname }}_full_setup.mqsc.
+    # It must already be running before mqsicreatebroker associates the node below.
+    - name: Confirm the associated queue manager {{ node_qmgr }} is running
       ansible.builtin.command: "{{ mq_install_dir }}/bin/dspmq -m {{ node_qmgr }}"
       become_user: "{{ ace_user }}"
       register: dspmq_node
       changed_when: false
-      failed_when: false
-
-    - name: Create the associated queue manager {{ node_qmgr }}
-      ansible.builtin.command: "{{ mq_install_dir }}/bin/crtmqm {{ node_qmgr }}"
-      become_user: "{{ ace_user }}"
-      when: "node_qmgr not in dspmq_node.stdout"
-
-    - name: Start the associated queue manager {{ node_qmgr }}
-      ansible.builtin.command: "{{ mq_install_dir }}/bin/strmqm {{ node_qmgr }}"
-      become_user: "{{ ace_user }}"
-      register: strmqm_node
-      changed_when: "'already running' not in (strmqm_node.stdout | lower)"
-      failed_when: strmqm_node.rc not in [0, 5]    # rc 5 = already running
-
-    - name: Create systemd unit for the associated queue manager
-      ansible.builtin.copy:
-        dest: "/etc/systemd/system/mq-{{ node_qmgr }}.service"
-        mode: "0644"
-        content: |
-          [Unit]
-          Description=IBM MQ Queue Manager {{ node_qmgr }} (ACE node {{ node_name }})
-          After=network-online.target
-          Wants=network-online.target
-
-          [Service]
-          Type=forking
-          User={{ ace_user }}
-          ExecStart={{ mq_install_dir }}/bin/strmqm {{ node_qmgr }}
-          ExecStop={{ mq_install_dir }}/bin/endmqm -w {{ node_qmgr }}
-          Restart=on-failure
-
-          [Install]
-          WantedBy=multi-user.target
-
-    - name: Enable the associated queue manager on boot
-      ansible.builtin.systemd:
-        name: "mq-{{ node_qmgr }}"
-        enabled: true
-        daemon_reload: true
-
-    # Cluster channel CONNAMEs reference server1/2/3 by name; make sure they
-    # resolve. setup_mq_components.yml manages the same block (identical marker),
-    # so this is a no-op when run via install_platform.yml.
-    - name: Ensure cluster member names resolve in /etc/hosts
-      ansible.builtin.blockinfile:
-        path: /etc/hosts
-        marker: "# {mark} ANSIBLE MANAGED — ACECLUSTER members"
-        block: |
-          {% for h in groups['all_mq_servers'] %}
-          {{ hostvars[h].ansible_host | default(h) }} {{ h }}
-          {% endfor %}
-
-    - name: Render {{ node_qmgr }} cluster + queue MQSC
-      ansible.builtin.copy:
-        dest: "/tmp/{{ node_qmgr }}-config.mqsc"
-        owner: "{{ ace_user }}"
-        group: "{{ ace_group }}"
-        mode: "0644"
-        content: |
-          DEFINE LISTENER(TCP.LSTR) TRPTYPE(TCP) PORT({{ node_qmgr_port }}) CONTROL(QMGR) REPLACE
-          START LISTENER(TCP.LSTR)
-          DEFINE CHANNEL({{ node_qmgr }}.CLUSRCVR) CHLTYPE(CLUSRCVR) TRPTYPE(TCP) CONNAME('{{ inventory_hostname }}({{ node_qmgr_port }})') CLUSTER({{ ace_cluster_name }}) REPLACE
-          DEFINE CHANNEL({{ node_qmgr }}.CLUSSDR) CHLTYPE(CLUSSDR) TRPTYPE(TCP) CONNAME('{{ ace_cluster_repo_conname }}') CLUSTER({{ ace_cluster_name }}) REPLACE
-          DEFINE QLOCAL('QL.INPUT') REPLACE
-          DEFINE QLOCAL('QL.INPUT.LFT') REPLACE
-          DEFINE QLOCAL('QL.LOCAL') REPLACE
-          DEFINE QLOCAL('QL.OUT') REPLACE
-          DEFINE QLOCAL('QL.OUT.SPLIT') REPLACE
-          DEFINE QLOCAL('QL.OUT1') REPLACE
-          DEFINE QLOCAL('QL.OUT2') REPLACE
-          DEFINE QLOCAL('QL.SOURCE') REPLACE
-          DEFINE QLOCAL('QL.TARGET.LAPTOP') REPLACE
-          DEFINE QLOCAL('QL.TARGET.MONITOR') REPLACE
-          DEFINE QLOCAL('QL.TARGET.MOUSE') REPLACE
-          DEFINE QLOCAL('QL.TARGET.SPLIT') REPLACE
-          DEFINE QLOCAL('QL.TARGET.SPLIT_IN') REPLACE
-          DEFINE QLOCAL('QL.TARGET.SPLIT_OUT') REPLACE
-
-    - name: Apply {{ node_qmgr }} cluster + queue MQSC (join {{ ace_cluster_name }})
-      ansible.builtin.shell: "{{ mq_install_dir }}/bin/runmqsc {{ node_qmgr }} < /tmp/{{ node_qmgr }}-config.mqsc"
-      become_user: "{{ ace_user }}"
-      register: runmqsc_node
-      changed_when: true
-      failed_when: runmqsc_node.rc != 0
+      failed_when: "'(Running)' not in dspmq_node.stdout"
 
     # --- 4b. Integration node, associated with {{ node_qmgr }} --------------
     - name: Create integration node {{ node_name }} (associated with {{ node_qmgr }})

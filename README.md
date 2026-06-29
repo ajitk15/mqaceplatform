@@ -129,7 +129,7 @@ IPv4s — so most of it is beyond the free allowance.
 ### IBM MQ (Servers 1, 2, 3, 4)
 | Port | Purpose |
 |------|---------|
-| 1414–1421 | MQ Listeners — cluster QMs (1414 MQREPO1, 1415 QM1, 1416 MQREPO2) + ACE node QMs (1420 MQNODE1, 1421 MQNODE2); open in-VPC only |
+| 1414–1421 | MQ Listeners — full-repo QMs (1414 MQREPO1, 1416 MQREPO2), dev QM (1415 MQQM1), ACE node QMs (1420 MQNODE1, 1421 MQNODE2); open in-VPC only |
 | 9443 | MQ Web Console HTTPS |
 | 9080 | MQ Web Console HTTP |
 | 1883 | MQTT |
@@ -184,12 +184,31 @@ sudo journalctl -u platform-install -f      # or: tail -f /var/log/platform-inst
 |----------|------|
 | `install_mq.yml` | Install IBM MQ on all MQ servers (mirrors the manual RPM install) |
 | `setup_mq_components.yml` | Create per-server queue managers + `ACECLUSTER` from `scripts/mqsetup/*.mqsc` |
-| `configure_mq.yml` | Create the dev QM (`QM1`) + dev MQSC objects + start the MQ Console (mqweb) |
-| `install_ace.yml` | Install IBM ACE on the MQ+ACE servers (Server 2 & 3) |
+| `configure_mq.yml` | Start the MQ Console (mqweb) on every MQ server (dev QM `MQQM1` is created by `setup_mq_components.yml`) |
+| `install_ace.yml` | Install IBM ACE + create the integration node (bound to `MQNODE1`/`MQNODE2`) on the MQ+ACE servers (Server 2 & 3) |
 | `schedule_dumps.yml` | Control node: every-30-min queue-manager / node config dump cron |
 | `setup_mqacemcp.yml` | Control node: clone the MQ+ACE MCP stack, build per-component Python 3.13 venvs, run under systemd |
 | `setup_gateway.yml` | Control node: Caddy secure gateway (`:443`/`:8444`/`:8445`, HTTPS + Basic Auth) fronting the dashboard, chat UI, and log dashboard |
 | `setup_ace_components.yml` | Create integration servers + deploy demo BARs (best-effort) |
+
+### Queue manager topology
+
+Every queue manager — its listener, cluster channels and queues — is defined in
+`scripts/mqsetup/serverN_full_setup.mqsc` and created by `setup_mq_components.yml`
+(idempotent: `crtmqm`/`strmqm` are non-fatal on re-run, MQSC uses `REPLACE`).
+`setup_mq_components.yml` also writes a `systemd` unit per queue manager so each
+auto-starts on boot.
+
+| Server | Queue managers (listener port) | Role |
+|--------|--------------------------------|------|
+| Server 1 | `MQREPO1` (1414), `MQQM1` (1415) | `ACECLUSTER` full repository + standalone **dev** QM (`DEV.QUEUE.1`, `DEV.*.SVRCONN`, mqweb console) |
+| Server 2 | `MQREPO2` (1416), `MQNODE1` (1420) | `ACECLUSTER` full repository + ACE node **NODE1**'s associated QM |
+| Server 3 | `MQNODE2` (1421) | ACE node **NODE2**'s associated QM (partial cluster member) |
+
+`MQQM1` is a standalone developer queue manager (it does not join `ACECLUSTER`).
+The ACE integration nodes are bound to their queue managers (`NODE1`→`MQNODE1`,
+`NODE2`→`MQNODE2`) by `install_ace.yml` via `mqsicreatebroker -q`, which requires
+the queue manager to already be running — hence `setup_mq_components.yml` runs first.
 
 Two more scripts run outside `install_platform.yml`: `run_validate.sh`
 (every 2 min via cron) renders the `:8090` status dashboard, and

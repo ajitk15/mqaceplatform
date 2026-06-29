@@ -1,86 +1,14 @@
 ---
 ###############################################################################
-# configure_mq.yml — create a queue manager + start the MQ Console (mqweb)
+# configure_mq.yml — start the MQ Console (mqweb) on every MQ server
 #
-# Run AFTER install_mq.yml. The install playbook deliberately mirrors the manual
-# RPM install and stops at setmqinst; this playbook does the runtime config.
+# Run AFTER install_mq.yml and setup_mq_components.yml. The queue managers
+# (including the developer MQQM1, folded into scripts/mqsetup/server1_full_setup.mqsc)
+# are created by setup_mq_components.yml; this playbook only brings up the
+# MQ Console / REST API (mqweb).
 #
 #   ansible-playbook -i /etc/ansible/hosts configure_mq.yml
 ###############################################################################
-
-- name: Configure IBM MQ — queue manager, dev objects, web console
-  hosts: mq_only          # QM1 (dev/console) lives only on server1
-  become: true
-  gather_facts: false
-  vars_files:
-    - mq_ace_install_vars.yml
-
-  tasks:
-    # --- Queue manager (crtmqm + strmqm, idempotent) ------------------------
-    - name: Check whether the queue manager exists
-      ansible.builtin.command: "{{ mq_install_dir }}/bin/dspmq -m {{ mq_queue_manager }}"
-      become_user: mqm
-      register: dspmq
-      changed_when: false
-      failed_when: false
-
-    - name: Create the queue manager
-      ansible.builtin.command: "{{ mq_install_dir }}/bin/crtmqm {{ mq_queue_manager }}"
-      become_user: mqm
-      when: "mq_queue_manager not in dspmq.stdout"
-
-    - name: Start the queue manager
-      ansible.builtin.command: "{{ mq_install_dir }}/bin/strmqm {{ mq_queue_manager }}"
-      become_user: mqm
-      register: strmqm
-      changed_when: "'already running' not in (strmqm.stdout | lower)"
-      failed_when: strmqm.rc not in [0, 5]    # rc 5 = already running
-
-    - name: Render developer MQSC config
-      ansible.builtin.copy:
-        dest: /tmp/dev-config.mqsc
-        mode: "0644"
-        content: |
-          DEFINE LISTENER('DEV.LISTENER.TCP') TRPTYPE(TCP) PORT({{ mq_listener_port }}) CONTROL(QMGR) REPLACE
-          START LISTENER('DEV.LISTENER.TCP')
-          DEFINE QLOCAL('DEV.QUEUE.1') REPLACE
-          DEFINE CHANNEL('DEV.APP.SVRCONN') CHLTYPE(SVRCONN) REPLACE
-          DEFINE CHANNEL('DEV.ADMIN.SVRCONN') CHLTYPE(SVRCONN) MCAUSER('{{ mq_admin_user }}') REPLACE
-
-    - name: Apply developer MQSC config
-      ansible.builtin.shell: "{{ mq_install_dir }}/bin/runmqsc {{ mq_queue_manager }} < /tmp/dev-config.mqsc"
-      become_user: mqm
-      register: runmqsc
-      changed_when: true
-      # rc 10 = MQSC completed with warnings (e.g. AMQ8730W listener already
-      # active on re-run); only a genuine error rc should fail the task.
-      failed_when: runmqsc.rc not in [0, 10]
-
-    - name: Create systemd unit for the queue manager
-      ansible.builtin.copy:
-        dest: "/etc/systemd/system/mq-{{ mq_queue_manager }}.service"
-        mode: "0644"
-        content: |
-          [Unit]
-          Description=IBM MQ Queue Manager {{ mq_queue_manager }}
-          After=network-online.target
-          Wants=network-online.target
-
-          [Service]
-          Type=forking
-          User=mqm
-          ExecStart={{ mq_install_dir }}/bin/strmqm {{ mq_queue_manager }}
-          ExecStop={{ mq_install_dir }}/bin/endmqm -w {{ mq_queue_manager }}
-          Restart=on-failure
-
-          [Install]
-          WantedBy=multi-user.target
-
-    - name: Enable queue manager service on boot
-      ansible.builtin.systemd:
-        name: "mq-{{ mq_queue_manager }}"
-        enabled: true
-        daemon_reload: true
 
 - name: Enable the MQ Web Console (mqweb) on every MQ server
   hosts: all_mq_servers      # MQ Console must come up on server1, server2 and server3
